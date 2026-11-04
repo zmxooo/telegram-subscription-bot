@@ -17,6 +17,10 @@ const PROTOCOL_ALIASES = {
 
 // ======================================
 // 主解析入口
+//
+// 默认最多缓存 1000 个节点。
+// 导出全部节点时：parseInput(raw, Number.MAX_SAFE_INTEGER)
+// 重复节点不删除，只统计。
 // ======================================
 
 export function parseInput(input, maxNodes = 1000) {
@@ -26,8 +30,12 @@ export function parseInput(input, maxNodes = 1000) {
     return {
       nodes: [],
       totalCount: 0,
+      parsedCount: 0,
+      truncatedCount: 0,
       duplicateCount: 0,
-      uniqueCount: 0
+      uniqueCount: 0,
+      protocolCounts: {},
+      regionCounts: {}
     };
   }
 
@@ -54,28 +62,120 @@ export function parseInput(input, maxNodes = 1000) {
     }
   }
 
-  // 不删除重复节点，只统计
+  // ======================================
+  // 全量统计：必须在节点截断之前完成
+  // ======================================
+
   const fingerprints = nodes.map(getFingerprint);
   const uniqueCount = new Set(fingerprints).size;
   const totalCount = nodes.length;
   const duplicateCount = totalCount - uniqueCount;
 
-  const limit = Math.max(1, Math.floor(Number(maxNodes) || 500));
+  const protocolCounts = {};
+  const regionCounts = {};
+
+  for (const node of nodes) {
+    protocolCounts[node.type] = (protocolCounts[node.type] || 0) + 1;
+
+    const r = region(node.name);
+    regionCounts[r] = (regionCounts[r] || 0) + 1;
+  }
+
+  // ======================================
+  // 限制缓存数量
+  // Infinity / MAX_SAFE_INTEGER 表示不截断
+  // ======================================
+
+  let limit = Number(maxNodes);
+
+  if (maxNodes === Infinity || limit === Infinity) {
+    limit = totalCount;
+  } else if (!Number.isFinite(limit)) {
+    limit = 1000;
+  }
+
+  limit = Math.max(1, Math.floor(limit));
+
   const limitedNodes = nodes.slice(0, limit);
 
   return {
     nodes: limitedNodes,
     totalCount,
+    parsedCount: totalCount,
+    truncatedCount: Math.max(0, totalCount - limitedNodes.length),
     uniqueCount,
-    duplicateCount
+    duplicateCount,
+    protocolCounts,
+    regionCounts
   };
 }
 
 // ======================================
 // 重复节点指纹
+//
+// YAML 节点：根据完整配置生成指纹。
+// URI 节点：保留完整 URI 参数，忽略备注名称。
 // ======================================
 
+function stableValue(value) {
+  if (Array.isArray(value)) {
+    return value.map(stableValue);
+  }
+
+  if (value && typeof value === "object") {
+    const result = {};
+
+    for (const key of Object.keys(value).sort()) {
+      if (key === "name") continue;
+      result[key] = stableValue(value[key]);
+    }
+
+    return result;
+  }
+
+  return value;
+}
+
 function getFingerprint(n) {
+  if (n.rawProxy) {
+    return JSON.stringify(stableValue(n.rawProxy));
+  }
+
+  if (n.uri) {
+    try {
+      if (n.type === "vmess") {
+        const data = n.vmessData || {};
+        const normalized = { ...data };
+
+        delete normalized.ps;
+
+        return "vmess|" + JSON.stringify(stableValue(normalized));
+      }
+
+      const u = new URL(n.uri);
+
+      // 去除备注名称，不影响连接参数
+      u.hash = "";
+
+      // 参数排序，避免参数顺序不同造成误判
+      const params = [...u.searchParams.entries()]
+        .sort((a, b) => {
+          const keyCompare = a[0].localeCompare(b[0]);
+          return keyCompare || a[1].localeCompare(b[1]);
+        });
+
+      u.search = "";
+
+      for (const [key, value] of params) {
+        u.searchParams.append(key, value);
+      }
+
+      return u.toString().toLowerCase();
+    } catch {
+      return String(n.uri).split("#")[0].toLowerCase();
+    }
+  }
+
   return [
     n.type || "",
     n.server || "",
@@ -125,7 +225,10 @@ function decodeBase64(text) {
   try {
     let normalized = clean.replace(/-/g, "+").replace(/_/g, "/");
     normalized = normalized.replace(/=+$/, "");
-    normalized = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    normalized = normalized.padEnd(
+      Math.ceil(normalized.length / 4) * 4,
+      "="
+    );
 
     const binary = atob(normalized);
     const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
@@ -207,7 +310,9 @@ function parseUri(uri) {
     const server = u.hostname;
     const port = Number(u.port);
 
-    if (!server || !port || port < 1 || port > 65535) return null;
+    if (!server || !port || port < 1 || port > 65535) {
+      return null;
+    }
 
     let name = server;
 
@@ -309,7 +414,9 @@ function proxyToNode(p) {
   const server = String(p.server || "");
   const port = Number(p.port || 0);
 
-  if (!server || !port || port < 1 || port > 65535) return null;
+  if (!server || !port || port < 1 || port > 65535) {
+    return null;
+  }
 
   const name = String(p.name ?? server);
 
@@ -333,6 +440,7 @@ function proxyToNode(p) {
   };
 
   node.uri = buildNodeUri(node);
+
   return node;
 }
 
@@ -638,12 +746,10 @@ function region(name) {
 
   const s = original.toLowerCase();
 
-  // 先匹配中文名称、英文国家名称、城市别名
   for (const entry of REGION_MATCHERS) {
     const alias = entry.alias.toLowerCase();
 
     if (/[a-z]/i.test(alias)) {
-      // 英文名称按单词边界匹配，避免 de、us 等误匹配普通单词
       const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const re = new RegExp(`(^|[^a-z])${escaped}([^a-z]|$)`, "i");
 
@@ -653,7 +759,7 @@ function region(name) {
     }
   }
 
-  // ISO 两位代码只接受独立词，例如 "DE 01"、"节点-US"
+  // ISO 两位代码只接受独立词
   for (const item of REGION_MAP) {
     const re = new RegExp(
       `(^|[^a-z])${item.code.toLowerCase()}([^a-z]|$)`,
@@ -791,21 +897,35 @@ export function renderResult(p, nodeLimit = 20) {
   const nodes = p.nodes || [];
   const limit = Math.max(0, Math.floor(Number(nodeLimit) || 20));
 
-  const protocols = {};
-  const regions = {};
+  // 优先使用全量统计结果
+  const protocols = p.protocolCounts || {};
+  const regions = p.regionCounts || {};
 
-  for (const n of nodes) {
-    protocols[n.type] = (protocols[n.type] || 0) + 1;
+  // 兼容旧缓存：没有统计字段时从缓存节点统计
+  if (!p.protocolCounts || !p.regionCounts) {
+    for (const n of nodes) {
+      if (!p.protocolCounts) {
+        protocols[n.type] = (protocols[n.type] || 0) + 1;
+      }
 
-    const r = region(n.name);
-    regions[r] = (regions[r] || 0) + 1;
+      if (!p.regionCounts) {
+        const r = region(n.name);
+        regions[r] = (regions[r] || 0) + 1;
+      }
+    }
   }
 
   const fingerprints = new Set(nodes.map(getFingerprint));
 
-  const duplicateCount = p.duplicateCount ?? (nodes.length - fingerprints.size);
+  const duplicateCount =
+    p.duplicateCount ?? (nodes.length - fingerprints.size);
+
   const uniqueCount = p.uniqueCount ?? fingerprints.size;
   const totalCount = p.totalCount ?? nodes.length;
+
+  const parsedCount = p.parsedCount ?? totalCount;
+  const truncatedCount =
+    p.truncatedCount ?? Math.max(0, parsedCount - nodes.length);
 
   const info = parseUserinfo(
     p.headers?.userinfo ||
@@ -821,6 +941,9 @@ export function renderResult(p, nodeLimit = 20) {
   ].join(",");
 
   const airportName = getAirportName(p.sourceUrl);
+
+  const visibleNodes = nodes.slice(0, limit);
+  const hiddenCachedCount = Math.max(0, nodes.length - visibleNodes.length);
 
   const lines = [
     `📋 机场名称: ${escapeHtml(airportName)}`,
@@ -841,14 +964,14 @@ export function renderResult(p, nodeLimit = 20) {
 
     `协议类型: ${Object.keys(protocols).join(",") || "未知"}`,
 
-    `节点总数: ${totalCount} | 国家/地区数: ${regionNames.length}`,
+    `节点总数: ${totalCount} | 国家/地区数: ${regionNames.length + (regions["未知"] ? 1 : 0)}`,
 
     `重复节点: ${duplicateCount} | 实际唯一节点: ${uniqueCount}`,
 
     `协议统计: ${
       Object.entries(protocols)
         .map(([k, v]) => `${k}: ${v}`)
-        .join(" | ")
+        .join(" | ") || "未知"
     }`,
 
     `节点范围: ${escapeHtml(regionRange || "🌐未知")}`,
@@ -858,7 +981,7 @@ export function renderResult(p, nodeLimit = 20) {
     `节点列表 (共 ${totalCount} 个)`
   ];
 
-  for (const n of nodes.slice(0, limit)) {
+  for (const n of visibleNodes) {
     const r = region(n.name);
 
     lines.push(
@@ -866,8 +989,12 @@ export function renderResult(p, nodeLimit = 20) {
     );
   }
 
-  if (totalCount > limit) {
-    lines.push(`... 等等 (${totalCount - limit} 个更多节点未显示)`);
+  if (hiddenCachedCount > 0) {
+    lines.push(`... 还有 ${hiddenCachedCount} 个节点未显示`);
+  }
+
+  if (truncatedCount > 0) {
+    lines.push(`⚠️ 另有 ${truncatedCount} 个节点未载入缓存，导出时需重新解析原始内容`);
   }
 
   return lines.join("\n");
@@ -891,6 +1018,7 @@ export function exportBase64(nodes) {
 // ======================================
 
 function nodeToClash(n) {
+  // YAML 原始节点优先保留完整配置
   if (n.rawProxy) {
     return {
       ...n.rawProxy,
