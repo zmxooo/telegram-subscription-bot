@@ -11,6 +11,8 @@ export { UsageGuard } from "./usage.js";
 const MAX_WEBHOOK_BYTES = 1024 * 1024;
 const MAX_SETUP_SECRET_LENGTH = 256;
 
+const TELEGRAM_SECRET_PATTERN = /^[A-Za-z0-9_-]{1,256}$/;
+
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store"
@@ -20,10 +22,13 @@ const JSON_HEADERS = {
 // 通用响应
 // ======================================
 
-function jsonResponse(data, status = 200) {
+function jsonResponse(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: JSON_HEADERS
+    headers: {
+      ...JSON_HEADERS,
+      ...extraHeaders
+    }
   });
 }
 
@@ -42,6 +47,7 @@ function textResponse(message, status = 200, extraHeaders = {}) {
     status,
     headers: {
       "content-type": "text/plain; charset=utf-8",
+      "cache-control": "no-store",
       ...extraHeaders
     }
   });
@@ -57,7 +63,10 @@ function methodNotAllowed(allow) {
       ok: false,
       error: "Method not allowed"
     },
-    405
+    405,
+    {
+      Allow: allow
+    }
   );
 }
 
@@ -95,7 +104,7 @@ async function readRequestBody(request, maxBytes) {
       totalBytes += value.byteLength;
 
       if (totalBytes > maxBytes) {
-        await reader.cancel();
+        await reader.cancel().catch(() => {});
         throw new Error("BODY_TOO_LARGE");
       }
 
@@ -147,8 +156,10 @@ function isValidUpdate(update) {
 
 function checkWebhookEnvironment(env) {
   return Boolean(
-    env.BOT_TOKEN &&
-    env.WEBHOOK_SECRET
+    typeof env.BOT_TOKEN === "string" &&
+    env.BOT_TOKEN.length > 0 &&
+    typeof env.WEBHOOK_SECRET === "string" &&
+    env.WEBHOOK_SECRET.length > 0
   );
 }
 
@@ -176,7 +187,9 @@ async function handleShortRequest(request, url, env) {
     return textResponse(
       "Method not allowed",
       405,
-      { Allow: "GET" }
+      {
+        Allow: "GET"
+      }
     );
   }
 
@@ -229,25 +242,26 @@ async function handleWebhook(request, env, ctx) {
     return textResponse("Forbidden", 403);
   }
 
-  let raw;
   let update;
 
   try {
-    raw = await readRequestBody(
+    const raw = await readRequestBody(
       request,
       MAX_WEBHOOK_BYTES
     );
 
     update = JSON.parse(raw);
   } catch (error) {
-    if (error.message === "BODY_TOO_LARGE") {
+    const message = error?.message;
+
+    if (message === "BODY_TOO_LARGE") {
       return jsonError(
         "Request too large",
         413
       );
     }
 
-    if (error.message === "INVALID_CONTENT_LENGTH") {
+    if (message === "INVALID_CONTENT_LENGTH") {
       return jsonError(
         "Invalid Content-Length",
         400
@@ -286,7 +300,8 @@ async function handleWebhook(request, env, ctx) {
     );
   }
 
-  // 快速响应 Telegram，消息交给后台处理
+  // 快速响应 Telegram，消息交给后台处理。
+  // 后台处理失败会记录日志，但不会自动触发 Telegram 重投。
   ctx.waitUntil(
     Promise.resolve()
       .then(() => handleTelegramUpdate(update, env))
@@ -319,7 +334,18 @@ async function handleSetWebhook(request, url, env) {
     );
   }
 
-  // 使用请求头验证，不再使用 URL 参数传递密钥
+  // Telegram secret_token 只允许字母、数字、下划线和连字符。
+  if (
+    env.WEBHOOK_SECRET.length > MAX_SETUP_SECRET_LENGTH ||
+    !TELEGRAM_SECRET_PATTERN.test(env.WEBHOOK_SECRET)
+  ) {
+    return jsonError(
+      "WEBHOOK_SECRET 格式不符合 Telegram 要求",
+      500
+    );
+  }
+
+  // 使用请求头验证，不使用 URL 参数传递密钥。
   const key = request.headers.get(
     "X-Setup-Secret"
   );
@@ -332,6 +358,14 @@ async function handleSetWebhook(request, url, env) {
     return textResponse(
       "Forbidden",
       403
+    );
+  }
+
+  // Telegram Webhook 必须使用公开 HTTPS 地址。
+  if (url.protocol !== "https:") {
+    return jsonError(
+      "Webhook 必须使用 HTTPS 地址",
+      400
     );
   }
 
