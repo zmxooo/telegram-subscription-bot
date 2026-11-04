@@ -21,9 +21,9 @@ import {
   saveSubscription
 } from "./short.js";
 
-// ================================
+// ======================================
 // 基础配置
-// ================================
+// ======================================
 
 function getMaxNodes(env) {
   const value = Number(env.MAX_NODES || 1000);
@@ -35,12 +35,25 @@ function getMaxNodes(env) {
   return Math.min(Math.floor(value), 1000);
 }
 
-// ================================
+const ALLOWED_ACTIONS = new Set([
+  "refresh",
+  "toggle",
+  "base64",
+  "yaml",
+  "short",
+  "save"
+]);
+
+// ======================================
 // Telegram API
-// ================================
+// ======================================
 
 export async function telegram(env, method, body = {}) {
-  const r = await fetch(
+  if (!env.BOT_TOKEN) {
+    throw new Error("BOT_TOKEN 未配置。");
+  }
+
+  const response = await fetch(
     `https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`,
     {
       method: "POST",
@@ -54,12 +67,12 @@ export async function telegram(env, method, body = {}) {
   let data;
 
   try {
-    data = await r.json();
+    data = await response.json();
   } catch {
     throw new Error(`Telegram ${method}: 返回数据异常`);
   }
 
-  if (!r.ok || !data.ok) {
+  if (!response.ok || !data.ok) {
     throw new Error(
       `Telegram ${method}: ${data?.description || "unknown error"}`
     );
@@ -68,16 +81,19 @@ export async function telegram(env, method, body = {}) {
   return data.result;
 }
 
-// ================================
+// ======================================
 // 获取 Bot 自身 ID
-// 同一个 Worker 实例内缓存
-// ================================
+// 按 Token 缓存，避免更换 Token 后使用旧 ID
+// ======================================
 
-let cachedBotId = null;
+let cachedBot = null;
 
 async function getBotId(env) {
-  if (cachedBotId !== null) {
-    return cachedBotId;
+  if (
+    cachedBot &&
+    cachedBot.token === env.BOT_TOKEN
+  ) {
+    return cachedBot.id;
   }
 
   const me = await telegram(env, "getMe");
@@ -86,22 +102,29 @@ async function getBotId(env) {
     throw new Error("无法获取 Bot 身份信息。");
   }
 
-  cachedBotId = me.id;
+  cachedBot = {
+    token: env.BOT_TOKEN,
+    id: me.id
+  };
 
-  return cachedBotId;
+  return me.id;
 }
 
-// ================================
-// 检查 Bot 自身是否为群组管理员
-// ================================
+// ======================================
+// 检查 Bot 是否为群组管理员
+// ======================================
 
 async function isBotAdmin(env, chatId) {
   const botId = await getBotId(env);
 
-  const member = await telegram(env, "getChatMember", {
-    chat_id: chatId,
-    user_id: botId
-  });
+  const member = await telegram(
+    env,
+    "getChatMember",
+    {
+      chat_id: chatId,
+      user_id: botId
+    }
+  );
 
   return [
     "creator",
@@ -109,15 +132,19 @@ async function isBotAdmin(env, chatId) {
   ].includes(member.status);
 }
 
-// ================================
+// ======================================
 // 检查点击按钮的用户是否为管理员
-// ================================
+// ======================================
 
 async function isAdmin(env, chatId, userId) {
-  const member = await telegram(env, "getChatMember", {
-    chat_id: chatId,
-    user_id: userId
-  });
+  const member = await telegram(
+    env,
+    "getChatMember",
+    {
+      chat_id: chatId,
+      user_id: userId
+    }
+  );
 
   return [
     "creator",
@@ -125,9 +152,9 @@ async function isAdmin(env, chatId, userId) {
   ].includes(member.status);
 }
 
-// ================================
+// ======================================
 // 消息发送
-// ================================
+// ======================================
 
 async function reply(env, chatId, text, extra = {}) {
   return telegram(env, "sendMessage", {
@@ -139,9 +166,9 @@ async function reply(env, chatId, text, extra = {}) {
   });
 }
 
-// ================================
-// 原消息编辑
-// ================================
+// ======================================
+// 编辑原消息
+// ======================================
 
 async function editMessage(
   env,
@@ -161,9 +188,9 @@ async function editMessage(
   });
 }
 
-// ================================
+// ======================================
 // 回调提示
-// ================================
+// ======================================
 
 async function answerCallback(
   env,
@@ -172,24 +199,28 @@ async function answerCallback(
   showAlert = false
 ) {
   try {
-    await telegram(env, "answerCallbackQuery", {
-      callback_query_id: callbackId,
-      text: text || undefined,
-      show_alert: showAlert
-    });
-  } catch (e) {
+    await telegram(
+      env,
+      "answerCallbackQuery",
+      {
+        callback_query_id: callbackId,
+        text: text || undefined,
+        show_alert: showAlert
+      }
+    );
+  } catch (error) {
     console.error(
       "answerCallbackQuery error:",
-      e?.message || e
+      error?.message || error
     );
   }
 }
 
-// ================================
+// ======================================
 // 六项操作按钮
-// expanded=true：显示20个
-// expanded=false：显示2个
-// ================================
+// expanded=true：显示前20个
+// expanded=false：显示前2个
+// ======================================
 
 function callbackKeyboard(key, expanded = true) {
   return {
@@ -232,9 +263,9 @@ function callbackKeyboard(key, expanded = true) {
   };
 }
 
-// ================================
+// ======================================
 // 解析输入
-// ================================
+// ======================================
 
 async function loadAndParse(message, env) {
   const input = await extractMessageInput(message, env);
@@ -243,10 +274,13 @@ async function loadAndParse(message, env) {
   let headers = {};
 
   if (input.url) {
-    const got = await fetchSubscription(input.url, env);
+    const result = await fetchSubscription(
+      input.url,
+      env
+    );
 
-    source = got.text;
-    headers = got.headers || {};
+    source = result.text;
+    headers = result.headers || {};
   }
 
   const parsed = parseInput(
@@ -261,39 +295,46 @@ async function loadAndParse(message, env) {
   return parsed;
 }
 
-// ================================
+// ======================================
 // 接收 Telegram 更新
-// ================================
+// ======================================
 
 export async function handleTelegramUpdate(update, env) {
   if (update.callback_query) {
-    return handleCallback(update.callback_query, env);
+    return handleCallback(
+      update.callback_query,
+      env
+    );
   }
 
-  const m = update.message;
+  const message = update.message;
 
-  if (!m || !m.chat || !m.from || m.from.is_bot) {
+  if (
+    !message ||
+    !message.chat ||
+    !message.from ||
+    message.from.is_bot
+  ) {
     return;
   }
 
-  const chatId = m.chat.id;
-  const chatType = m.chat.type;
+  const chatId = message.chat.id;
+  const chatType = message.chat.type;
 
   try {
-    // ============================
-    // 群组 Bot 管理员强制检查
-    // 私聊不检查
-    // ============================
-
+    // 群组必须先验证 Bot 自身管理员身份
     if (chatType !== "private") {
-      let botAdmin = false;
+      let botAdmin;
 
       try {
-        botAdmin = await isBotAdmin(env, chatId);
-      } catch (e) {
+        botAdmin = await isBotAdmin(
+          env,
+          chatId
+        );
+      } catch (error) {
         console.error(
-          "bot admin check error:",
-          e?.message || e
+          "Bot admin check error:",
+          error?.message || error
         );
 
         await reply(
@@ -316,13 +357,15 @@ export async function handleTelegramUpdate(update, env) {
       }
     }
 
-    // ============================
-    // 开始解析
-    // ============================
+    const parsed = await loadAndParse(
+      message,
+      env
+    );
 
-    const parsed = await loadAndParse(m, env);
-
-    if (!parsed.nodes || !parsed.nodes.length) {
+    if (
+      !parsed.nodes ||
+      !parsed.nodes.length
+    ) {
       await reply(
         env,
         chatId,
@@ -332,29 +375,40 @@ export async function handleTelegramUpdate(update, env) {
       return;
     }
 
-    const key = await storeParsed(parsed, env);
-
-    // 默认展开：显示前20个节点
-    const text = renderResult(parsed, 20);
-
-    await reply(env, chatId, text, {
-      reply_markup: callbackKeyboard(key, true)
-    });
-
-  } catch (e) {
-    console.error("parse error:", e?.stack || e);
+    const key = await storeParsed(
+      parsed,
+      env
+    );
 
     await reply(
       env,
       chatId,
-      `解析失败：${escapeHtml(e.message || "未知错误")}`
+      renderResult(parsed, 20),
+      {
+        reply_markup: callbackKeyboard(
+          key,
+          true
+        )
+      }
+    );
+
+  } catch (error) {
+    console.error(
+      "Parse error:",
+      error?.stack || error
+    );
+
+    await reply(
+      env,
+      chatId,
+      `解析失败：${escapeHtml(error.message || "未知错误")}`
     );
   }
 }
 
-// ================================
+// ======================================
 // 统一缓存解析结果
-// ================================
+// ======================================
 
 function buildPayload(parsed) {
   return {
@@ -363,25 +417,44 @@ function buildPayload(parsed) {
     nodes: parsed.nodes || [],
     headers: parsed.headers || {},
 
-    totalCount: parsed.totalCount ?? parsed.nodes?.length ?? 0,
-    parsedCount: parsed.parsedCount ?? parsed.nodes?.length ?? 0,
-    truncatedCount: parsed.truncatedCount ?? 0,
+    totalCount:
+      parsed.totalCount ??
+      parsed.nodes?.length ??
+      0,
 
-    duplicateCount: parsed.duplicateCount ?? 0,
-    uniqueCount: parsed.uniqueCount ?? 0,
+    parsedCount:
+      parsed.parsedCount ??
+      parsed.nodes?.length ??
+      0,
 
-    protocolCounts: parsed.protocolCounts || {},
-    regionCounts: parsed.regionCounts || {},
+    truncatedCount:
+      parsed.truncatedCount ?? 0,
+
+    duplicateCount:
+      parsed.duplicateCount ?? 0,
+
+    uniqueCount:
+      parsed.uniqueCount ?? 0,
+
+    protocolCounts:
+      parsed.protocolCounts || {},
+
+    regionCounts:
+      parsed.regionCounts || {},
 
     createdAt: Date.now()
   };
 }
 
-// ================================
+// ======================================
 // 保存解析结果
-// ================================
+// ======================================
 
 async function storeParsed(parsed, env) {
+  if (!env.BOT_KV) {
+    throw new Error("BOT_KV 未配置。");
+  }
+
   const key = crypto.randomUUID()
     .replaceAll("-", "")
     .slice(0, 20);
@@ -399,30 +472,29 @@ async function storeParsed(parsed, env) {
   return key;
 }
 
-// ================================
+// ======================================
 // 更新解析缓存
-// ================================
+// ======================================
 
 async function updateParsed(key, parsed, env) {
-  const payload = buildPayload(parsed);
-
   await env.BOT_KV.put(
     `result:${key}`,
-    JSON.stringify(payload),
+    JSON.stringify(buildPayload(parsed)),
     {
       expirationTtl: 86400
     }
   );
 }
 
-// ================================
-// 重新解析完整原始内容
-// 用于完整导出
-// ================================
+// ======================================
+// 完整内容重新解析
+// ======================================
 
 function parseFullContent(data) {
   if (!data.raw) {
-    throw new Error("原始订阅内容不存在，无法导出。");
+    throw new Error(
+      "原始订阅内容不存在，无法导出。"
+    );
   }
 
   const parsed = parseInput(
@@ -430,70 +502,135 @@ function parseFullContent(data) {
     Number.MAX_SAFE_INTEGER
   );
 
-  if (!parsed.nodes || !parsed.nodes.length) {
+  if (
+    !parsed.nodes ||
+    !parsed.nodes.length
+  ) {
     throw new Error("没有可导出的节点。");
   }
 
   return parsed;
 }
 
-// ================================
+// ======================================
 // 展开 / 折叠节点
 // 不消耗功能次数
-// ================================
+// ======================================
 
-async function toggleNodes(q, env, key, state, data) {
+async function toggleNodes(
+  query,
+  env,
+  key,
+  state,
+  data
+) {
   const expanded = state === "1";
-
   const limit = expanded ? 20 : 2;
-
-  const text = renderResult(data, limit);
 
   await editMessage(
     env,
-    q.message.chat.id,
-    q.message.message_id,
-    text,
+    query.message.chat.id,
+    query.message.message_id,
+    renderResult(data, limit),
     key,
     expanded
   );
 
-  await answerCallback(env, q.id);
+  await answerCallback(
+    env,
+    query.id
+  );
 }
 
-// ================================
-// Callback 主处理
-// ================================
+// ======================================
+// 额度释放
+// 仅用于尚未产生实际业务结果的失败
+// ======================================
 
-async function handleCallback(q, env) {
-  if (!q || !q.message || !q.from || !q.id) {
+async function releaseUsage(
+  env,
+  usageKey,
+  action,
+  token
+) {
+  try {
+    await finishUsage(
+      env,
+      usageKey,
+      action,
+      token,
+      false
+    );
+  } catch (error) {
+    console.error(
+      "Release usage failed:",
+      error?.stack || error
+    );
+  }
+}
+
+// ======================================
+// 额度确认
+// 已完成的业务操作绝不主动释放额度
+// ======================================
+
+async function commitUsage(
+  env,
+  usageKey,
+  action,
+  token
+) {
+  try {
+    await finishUsage(
+      env,
+      usageKey,
+      action,
+      token,
+      true
+    );
+
+    return true;
+  } catch (error) {
+    console.error(
+      "Commit usage failed:",
+      error?.stack || error
+    );
+
+    return false;
+  }
+}
+
+// ======================================
+// Callback 主处理
+// ======================================
+
+async function handleCallback(query, env) {
+  if (
+    !query ||
+    !query.message ||
+    !query.from ||
+    !query.id
+  ) {
     return;
   }
 
-  const parts = String(q.data || "").split("|");
+  const parts = String(
+    query.data || ""
+  ).split("|");
 
   const prefix = parts[0];
   const action = parts[1];
   const key = parts[2];
   const state = parts[3];
 
-  const allowedActions = [
-    "refresh",
-    "toggle",
-    "base64",
-    "yaml",
-    "short",
-    "save"
-  ];
-
   if (
     prefix !== "act" ||
-    !allowedActions.includes(action) ||
+    !ALLOWED_ACTIONS.has(action) ||
     !/^[a-f0-9]{20}$/i.test(key || "")
   ) {
     await answerCallback(
       env,
-      q.id,
+      query.id,
       "无效的操作请求。",
       true
     );
@@ -501,31 +638,29 @@ async function handleCallback(q, env) {
     return;
   }
 
-  const chatId = q.message.chat.id;
-  const userId = q.from.id;
-  const chatType = q.message.chat.type;
+  const chatId = query.message.chat.id;
+  const chatType = query.message.chat.type;
+  const userId = query.from.id;
 
   try {
-    // ============================
     // 群组权限检查
-    // 第一步：Bot 必须是管理员
-    // 第二步：点击者必须是管理员
-    // ============================
-
     if (chatType !== "private") {
-      let botAdmin = false;
+      let botAdmin;
 
       try {
-        botAdmin = await isBotAdmin(env, chatId);
-      } catch (e) {
+        botAdmin = await isBotAdmin(
+          env,
+          chatId
+        );
+      } catch (error) {
         console.error(
-          "bot admin check error:",
-          e?.message || e
+          "Bot admin check error:",
+          error?.message || error
         );
 
         await answerCallback(
           env,
-          q.id,
+          query.id,
           "无法验证 Bot 管理员身份，请检查 Bot 是否仍为群组管理员。",
           true
         );
@@ -536,7 +671,7 @@ async function handleCallback(q, env) {
       if (!botAdmin) {
         await answerCallback(
           env,
-          q.id,
+          query.id,
           "Bot 必须是群组管理员才能使用此功能。",
           true
         );
@@ -544,10 +679,25 @@ async function handleCallback(q, env) {
         return;
       }
 
-      if (!(await isAdmin(env, chatId, userId))) {
+      let userAdmin = false;
+
+      try {
+        userAdmin = await isAdmin(
+          env,
+          chatId,
+          userId
+        );
+      } catch (error) {
+        console.error(
+          "User admin check error:",
+          error?.message || error
+        );
+      }
+
+      if (!userAdmin) {
         await answerCallback(
           env,
-          q.id,
+          query.id,
           "只有群组管理员可以使用此功能。",
           true
         );
@@ -556,10 +706,7 @@ async function handleCallback(q, env) {
       }
     }
 
-    // ============================
-    // 读取解析结果
-    // ============================
-
+    // 读取解析缓存
     const saved = await env.BOT_KV.get(
       `result:${key}`
     );
@@ -572,18 +719,17 @@ async function handleCallback(q, env) {
 
     const data = JSON.parse(saved);
 
-    // ============================
     // 展开 / 折叠
-    // 不消耗次数
-    // ============================
-
     if (action === "toggle") {
-      if (state !== "0" && state !== "1") {
+      if (
+        state !== "0" &&
+        state !== "1"
+      ) {
         throw new Error("无效的展开状态。");
       }
 
       await toggleNodes(
-        q,
+        query,
         env,
         key,
         state,
@@ -593,27 +739,30 @@ async function handleCallback(q, env) {
       return;
     }
 
-    // ============================
-    // 功能次数控制
-    // ============================
-
+    // 生成操作指纹
     const fingerprint = await sha256(
       data.sourceUrl || data.raw
     );
 
-    const usageKey = `${userId}:${fingerprint}`;
+    const usageKey =
+      `${userId}:${fingerprint}`;
 
+    // 原子领取额度
     const claim = await claimUsage(
       env,
       usageKey,
       action
     );
 
-    if (!claim || !claim.ok) {
+    if (
+      !claim ||
+      !claim.ok ||
+      !claim.token
+    ) {
       await answerCallback(
         env,
-        q.id,
-        "此用户对此订阅的该功能已经使用过一次。",
+        query.id,
+        claim?.error || "此用户对此订阅的该功能已经使用过一次，或操作正在处理中。",
         true
       );
 
@@ -622,12 +771,15 @@ async function handleCallback(q, env) {
 
     const token = claim.token;
 
-    try {
-      let message = "";
+    // committed 表示实际业务结果已经产生
+    let committed = false;
 
-      // ==========================
+    try {
+      let message = null;
+
+      // ==================================
       // 刷新订阅
-      // ==========================
+      // ==================================
 
       if (action === "refresh") {
         if (!data.sourceUrl) {
@@ -646,7 +798,10 @@ async function handleCallback(q, env) {
           getMaxNodes(env)
         );
 
-        if (!parsed.nodes.length) {
+        if (
+          !parsed.nodes ||
+          !parsed.nodes.length
+        ) {
           throw new Error(
             "刷新后没有识别到节点。"
           );
@@ -656,25 +811,28 @@ async function handleCallback(q, env) {
         parsed.raw = fresh.text;
         parsed.headers = fresh.headers || {};
 
-        await updateParsed(key, parsed, env);
+        await updateParsed(
+          key,
+          parsed,
+          env
+        );
 
-        const text = renderResult(parsed, 20);
+        // 缓存已经更新，不能再释放额度
+        committed = true;
 
         await editMessage(
           env,
           chatId,
-          q.message.message_id,
-          text,
+          query.message.message_id,
+          renderResult(parsed, 20),
           key,
           true
         );
-
-        message = null;
       }
 
-      // ==========================
+      // ==================================
       // 导出 Base64
-      // ==========================
+      // ==================================
 
       else if (action === "base64") {
         const full = parseFullContent(data);
@@ -682,9 +840,9 @@ async function handleCallback(q, env) {
         message = exportBase64(full.nodes);
       }
 
-      // ==========================
+      // ==================================
       // 导出 YAML
-      // ==========================
+      // ==================================
 
       else if (action === "yaml") {
         const full = parseFullContent(data);
@@ -692,9 +850,9 @@ async function handleCallback(q, env) {
         message = exportYaml(full.nodes);
       }
 
-      // ==========================
+      // ==================================
       // 生成公开短链
-      // ==========================
+      // ==================================
 
       else if (action === "short") {
         if (!data.sourceUrl) {
@@ -709,12 +867,16 @@ async function handleCallback(q, env) {
           data.raw
         );
 
-        message = `短链：${escapeHtml(short)}`;
+        // 短链已经写入 KV
+        committed = true;
+
+        message =
+          `短链：${escapeHtml(short)}`;
       }
 
-      // ==========================
+      // ==================================
       // 保存订阅
-      // ==========================
+      // ==================================
 
       else if (action === "save") {
         await saveSubscription(
@@ -723,81 +885,106 @@ async function handleCallback(q, env) {
           data.sourceUrl || data.raw
         );
 
+        // 订阅已经写入 KV
+        committed = true;
+
         message = "订阅已保存到你的个人记录。";
       }
 
-      // ==========================
-      // 发送文件或结果
-      // ==========================
+      // ==================================
+      // 发送结果或文件
+      // ==================================
 
-      if (message !== null && message !== "") {
+      if (
+        message !== null &&
+        message !== ""
+      ) {
         await deliver(
           env,
           chatId,
           message,
           action
         );
+
+        committed = true;
       }
 
-      // ==========================
-      // 操作成功才消耗次数
-      // ==========================
+      // ==================================
+      // 确认额度
+      // ==================================
 
-      await finishUsage(
+      const usageCommitted = await commitUsage(
         env,
         usageKey,
         action,
-        token,
-        true
+        token
       );
+
+      if (!usageCommitted) {
+        await answerCallback(
+          env,
+          query.id,
+          "操作已经完成，但额度记录同步失败，请勿重复点击。",
+          true
+        );
+
+        return;
+      }
 
       await answerCallback(
         env,
-        q.id,
+        query.id,
         "操作成功。"
       );
 
-    } catch (e) {
-      // 失败释放次数
-      try {
-        await finishUsage(
+    } catch (error) {
+      // 只有业务结果尚未产生时才能释放额度
+      if (!committed) {
+        await releaseUsage(
           env,
           usageKey,
           action,
-          token,
-          false
+          token
         );
-      } catch (finishError) {
+      } else {
         console.error(
-          "release usage error:",
-          finishError?.message || finishError
+          "Operation completed but follow-up failed; usage will not be released:",
+          error?.stack || error
         );
       }
 
-      throw e;
+      throw error;
     }
 
-  } catch (e) {
+  } catch (error) {
     console.error(
-      "callback error:",
-      e?.stack || e
+      "Callback error:",
+      error?.stack || error
     );
 
     await answerCallback(
       env,
-      q.id,
-      e.message || "操作失败",
+      query.id,
+      error.message || "操作失败",
       true
     );
   }
 }
 
-// ================================
-// 文件发送
-// ================================
+// ======================================
+// 发送文件或普通消息
+// ======================================
 
-async function deliver(env, chatId, text, action) {
-  if (action === "base64" || action === "yaml") {
+async function deliver(
+  env,
+  chatId,
+  text,
+  action
+) {
+  if (
+    action === "base64" ||
+    action === "yaml"
+  ) {
     const filename =
       action === "base64"
         ? "nodes_base64.txt"
@@ -812,10 +999,18 @@ async function deliver(env, chatId, text, action) {
 
     const form = new FormData();
 
-    form.set("chat_id", String(chatId));
-    form.set("document", blob, filename);
+    form.set(
+      "chat_id",
+      String(chatId)
+    );
 
-    const r = await fetch(
+    form.set(
+      "document",
+      blob,
+      filename
+    );
+
+    const response = await fetch(
       `https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`,
       {
         method: "POST",
@@ -823,53 +1018,66 @@ async function deliver(env, chatId, text, action) {
       }
     );
 
-    let j;
+    let result;
 
     try {
-      j = await r.json();
+      result = await response.json();
     } catch {
-      throw new Error("Telegram 文件发送返回异常。");
+      throw new Error(
+        "Telegram 文件发送返回异常。"
+      );
     }
 
-    if (!r.ok || !j.ok) {
+    if (
+      !response.ok ||
+      !result.ok
+    ) {
       throw new Error(
-        j.description || "发送文件失败"
+        result?.description || "发送文件失败"
       );
     }
 
     return;
   }
 
-  await reply(env, chatId, text);
+  await reply(
+    env,
+    chatId,
+    text
+  );
 }
 
-// ================================
+// ======================================
 // HTML 转义
-// ================================
+// ======================================
 
-function escapeHtml(s) {
-  return String(s ?? "").replace(
+function escapeHtml(value) {
+  return String(value ?? "").replace(
     /[&<>"]/g,
-    c => ({
+    character => ({
       "&": "&amp;",
       "<": "&lt;",
       ">": "&gt;",
       '"': "&quot;"
-    }[c])
+    }[character])
   );
 }
 
-// ================================
+// ======================================
 // SHA256
-// ================================
+// ======================================
 
-async function sha256(s) {
-  const b = await crypto.subtle.digest(
+async function sha256(value) {
+  const digest = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(String(s))
+    new TextEncoder().encode(
+      String(value ?? "")
+    )
   );
 
-  return [...new Uint8Array(b)]
-    .map(x => x.toString(16).padStart(2, "0"))
+  return [...new Uint8Array(digest)]
+    .map(byte =>
+      byte.toString(16).padStart(2, "0")
+    )
     .join("");
 }
