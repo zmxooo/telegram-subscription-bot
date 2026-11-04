@@ -1,7 +1,8 @@
+
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "telegram-subscription-parser",
-  "main": "src/index.js",
+  "main": "index.js",
   "compatibility_date": "2026-11-05",
   "observability": { "enabled": true },
   "kv_namespaces": [
