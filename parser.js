@@ -19,7 +19,7 @@ const PROTOCOL_ALIASES = {
 // 主解析入口
 // ======================================
 
-export function parseInput(input, maxNodes = 500) {
+export function parseInput(input, maxNodes = 1000) {
   let text = String(input || "").trim();
 
   if (!text) {
