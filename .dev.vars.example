@@ -1,0 +1,2 @@
+BOT_TOKEN=填TelegramBotToken
+WEBHOOK_SECRET=随机生成至少32位字符串
