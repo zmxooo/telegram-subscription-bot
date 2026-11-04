@@ -1,3 +1,4 @@
+
 import {
   parseInput,
   renderResult,
@@ -68,6 +69,63 @@ export async function telegram(env, method, body = {}) {
 }
 
 // ================================
+// 获取 Bot 自身 ID
+// 同一个 Worker 实例内缓存
+// ================================
+
+let cachedBotId = null;
+
+async function getBotId(env) {
+  if (cachedBotId !== null) {
+    return cachedBotId;
+  }
+
+  const me = await telegram(env, "getMe");
+
+  if (!me || !me.id || !me.is_bot) {
+    throw new Error("无法获取 Bot 身份信息。");
+  }
+
+  cachedBotId = me.id;
+
+  return cachedBotId;
+}
+
+// ================================
+// 检查 Bot 自身是否为群组管理员
+// ================================
+
+async function isBotAdmin(env, chatId) {
+  const botId = await getBotId(env);
+
+  const member = await telegram(env, "getChatMember", {
+    chat_id: chatId,
+    user_id: botId
+  });
+
+  return [
+    "creator",
+    "administrator"
+  ].includes(member.status);
+}
+
+// ================================
+// 检查点击按钮的用户是否为管理员
+// ================================
+
+async function isAdmin(env, chatId, userId) {
+  const member = await telegram(env, "getChatMember", {
+    chat_id: chatId,
+    user_id: userId
+  });
+
+  return [
+    "creator",
+    "administrator"
+  ].includes(member.status);
+}
+
+// ================================
 // 消息发送
 // ================================
 
@@ -125,19 +183,6 @@ async function answerCallback(
       e?.message || e
     );
   }
-}
-
-// ================================
-// 管理员判断
-// ================================
-
-async function isAdmin(env, chatId, userId) {
-  const m = await telegram(env, "getChatMember", {
-    chat_id: chatId,
-    user_id: userId
-  });
-
-  return ["creator", "administrator"].includes(m.status);
 }
 
 // ================================
@@ -232,8 +277,49 @@ export async function handleTelegramUpdate(update, env) {
   }
 
   const chatId = m.chat.id;
+  const chatType = m.chat.type;
 
   try {
+    // ============================
+    // 群组 Bot 管理员强制检查
+    // 私聊不检查
+    // ============================
+
+    if (chatType !== "private") {
+      let botAdmin = false;
+
+      try {
+        botAdmin = await isBotAdmin(env, chatId);
+      } catch (e) {
+        console.error(
+          "bot admin check error:",
+          e?.message || e
+        );
+
+        await reply(
+          env,
+          chatId,
+          "无法验证 Bot 的群组管理员身份，请确认 Bot 已加入群组并被设置为管理员。"
+        );
+
+        return;
+      }
+
+      if (!botAdmin) {
+        await reply(
+          env,
+          chatId,
+          "当前群组尚未授予 Bot 管理员权限。\n请先将 Bot 设置为群组管理员，再使用订阅查询功能。"
+        );
+
+        return;
+      }
+    }
+
+    // ============================
+    // 开始解析
+    // ============================
+
     const parsed = await loadAndParse(m, env);
 
     if (!parsed.nodes || !parsed.nodes.length) {
@@ -242,6 +328,7 @@ export async function handleTelegramUpdate(update, env) {
         chatId,
         "没有识别到支持的节点。请发送订阅链接、节点 URI、TXT 或 Clash YAML。"
       );
+
       return;
     }
 
@@ -276,7 +363,6 @@ function buildPayload(parsed) {
     nodes: parsed.nodes || [],
     headers: parsed.headers || {},
 
-    // 保存完整统计信息
     totalCount: parsed.totalCount ?? parsed.nodes?.length ?? 0,
     parsedCount: parsed.parsedCount ?? parsed.nodes?.length ?? 0,
     truncatedCount: parsed.truncatedCount ?? 0,
@@ -359,7 +445,6 @@ function parseFullContent(data) {
 async function toggleNodes(q, env, key, state, data) {
   const expanded = state === "1";
 
-  // 展开20个，折叠2个
   const limit = expanded ? 20 : 2;
 
   const text = renderResult(data, limit);
@@ -412,6 +497,7 @@ async function handleCallback(q, env) {
       "无效的操作请求。",
       true
     );
+
     return;
   }
 
@@ -422,19 +508,52 @@ async function handleCallback(q, env) {
   try {
     // ============================
     // 群组权限检查
+    // 第一步：Bot 必须是管理员
+    // 第二步：点击者必须是管理员
     // ============================
 
-    if (
-      chatType !== "private" &&
-      !(await isAdmin(env, chatId, userId))
-    ) {
-      await answerCallback(
-        env,
-        q.id,
-        "只有群组管理员可以使用此功能。",
-        true
-      );
-      return;
+    if (chatType !== "private") {
+      let botAdmin = false;
+
+      try {
+        botAdmin = await isBotAdmin(env, chatId);
+      } catch (e) {
+        console.error(
+          "bot admin check error:",
+          e?.message || e
+        );
+
+        await answerCallback(
+          env,
+          q.id,
+          "无法验证 Bot 管理员身份，请检查 Bot 是否仍为群组管理员。",
+          true
+        );
+
+        return;
+      }
+
+      if (!botAdmin) {
+        await answerCallback(
+          env,
+          q.id,
+          "Bot 必须是群组管理员才能使用此功能。",
+          true
+        );
+
+        return;
+      }
+
+      if (!(await isAdmin(env, chatId, userId))) {
+        await answerCallback(
+          env,
+          q.id,
+          "只有群组管理员可以使用此功能。",
+          true
+        );
+
+        return;
+      }
     }
 
     // ============================
@@ -497,10 +616,10 @@ async function handleCallback(q, env) {
         "此用户对此订阅的该功能已经使用过一次。",
         true
       );
+
       return;
     }
 
-    // 保存本次操作凭证
     const token = claim.token;
 
     try {
@@ -537,13 +656,10 @@ async function handleCallback(q, env) {
         parsed.raw = fresh.text;
         parsed.headers = fresh.headers || {};
 
-        // 更新完整缓存
         await updateParsed(key, parsed, env);
 
-        // 刷新后默认展开20个
         const text = renderResult(parsed, 20);
 
-        // 编辑原消息
         await editMessage(
           env,
           chatId,
@@ -558,7 +674,6 @@ async function handleCallback(q, env) {
 
       // ==========================
       // 导出 Base64
-      // 从原始内容重新解析全部节点
       // ==========================
 
       else if (action === "base64") {
@@ -569,7 +684,6 @@ async function handleCallback(q, env) {
 
       // ==========================
       // 导出 YAML
-      // 从原始内容重新解析全部节点
       // ==========================
 
       else if (action === "yaml") {
@@ -627,7 +741,6 @@ async function handleCallback(q, env) {
 
       // ==========================
       // 操作成功才消耗次数
-      // 必须传入 claim.token
       // ==========================
 
       await finishUsage(
