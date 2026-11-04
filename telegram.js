@@ -25,6 +25,9 @@ import {
 // 基础配置
 // ======================================
 
+const API_TIMEOUT = 15000;
+const MAX_FILE_SIZE = 5 * 1024 * 1024;
+
 function getMaxNodes(env) {
   const value = Number(env.MAX_NODES || 1000);
 
@@ -45,15 +48,51 @@ const ALLOWED_ACTIONS = new Set([
 ]);
 
 // ======================================
+// 通用超时请求
+// ======================================
+
+async function fetchWithTimeout(
+  url,
+  options = {},
+  timeout = API_TIMEOUT
+) {
+  const controller = new AbortController();
+
+  const timer = setTimeout(
+    () => controller.abort(),
+    timeout
+  );
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("请求超时，请稍后重试。");
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ======================================
 // Telegram API
 // ======================================
 
-export async function telegram(env, method, body = {}) {
+export async function telegram(
+  env,
+  method,
+  body = {}
+) {
   if (!env.BOT_TOKEN) {
     throw new Error("BOT_TOKEN 未配置。");
   }
 
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`,
     {
       method: "POST",
@@ -69,7 +108,9 @@ export async function telegram(env, method, body = {}) {
   try {
     data = await response.json();
   } catch {
-    throw new Error(`Telegram ${method}: 返回数据异常`);
+    throw new Error(
+      `Telegram ${method}: 返回数据异常`
+    );
   }
 
   if (!response.ok || !data.ok) {
@@ -83,7 +124,7 @@ export async function telegram(env, method, body = {}) {
 
 // ======================================
 // 获取 Bot 自身 ID
-// 按 Token 缓存，避免更换 Token 后使用旧 ID
+// 按 Token 缓存
 // ======================================
 
 let cachedBot = null;
@@ -96,10 +137,19 @@ async function getBotId(env) {
     return cachedBot.id;
   }
 
-  const me = await telegram(env, "getMe");
+  const me = await telegram(
+    env,
+    "getMe"
+  );
 
-  if (!me || !me.id || !me.is_bot) {
-    throw new Error("无法获取 Bot 身份信息。");
+  if (
+    !me ||
+    !me.id ||
+    !me.is_bot
+  ) {
+    throw new Error(
+      "无法获取 Bot 身份信息。"
+    );
   }
 
   cachedBot = {
@@ -133,10 +183,14 @@ async function isBotAdmin(env, chatId) {
 }
 
 // ======================================
-// 检查点击按钮的用户是否为管理员
+// 检查用户是否为群组管理员
 // ======================================
 
-async function isAdmin(env, chatId, userId) {
+async function isAdmin(
+  env,
+  chatId,
+  userId
+) {
   const member = await telegram(
     env,
     "getChatMember",
@@ -156,14 +210,23 @@ async function isAdmin(env, chatId, userId) {
 // 消息发送
 // ======================================
 
-async function reply(env, chatId, text, extra = {}) {
-  return telegram(env, "sendMessage", {
-    chat_id: chatId,
-    text,
-    parse_mode: "HTML",
-    disable_web_page_preview: true,
-    ...extra
-  });
+async function reply(
+  env,
+  chatId,
+  text,
+  extra = {}
+) {
+  return telegram(
+    env,
+    "sendMessage",
+    {
+      chat_id: chatId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      ...extra
+    }
+  );
 }
 
 // ======================================
@@ -178,14 +241,21 @@ async function editMessage(
   key,
   expanded
 ) {
-  return telegram(env, "editMessageText", {
-    chat_id: chatId,
-    message_id: messageId,
-    text,
-    parse_mode: "HTML",
-    disable_web_page_preview: true,
-    reply_markup: callbackKeyboard(key, expanded)
-  });
+  return telegram(
+    env,
+    "editMessageText",
+    {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: callbackKeyboard(
+        key,
+        expanded
+      )
+    }
+  );
 }
 
 // ======================================
@@ -218,11 +288,12 @@ async function answerCallback(
 
 // ======================================
 // 六项操作按钮
-// expanded=true：显示前20个
-// expanded=false：显示前2个
 // ======================================
 
-function callbackKeyboard(key, expanded = true) {
+function callbackKeyboard(
+  key,
+  expanded = true
+) {
   return {
     inline_keyboard: [
       [
@@ -236,7 +307,8 @@ function callbackKeyboard(key, expanded = true) {
           text: expanded
             ? "🔼 折叠全部节点"
             : "📄 显示全部节点",
-          callback_data: `act|toggle|${key}|${expanded ? "0" : "1"}`
+          callback_data:
+            `act|toggle|${key}|${expanded ? "0" : "1"}`
         }
       ],
       [
@@ -267,8 +339,14 @@ function callbackKeyboard(key, expanded = true) {
 // 解析输入
 // ======================================
 
-async function loadAndParse(message, env) {
-  const input = await extractMessageInput(message, env);
+async function loadAndParse(
+  message,
+  env
+) {
+  const input = await extractMessageInput(
+    message,
+    env
+  );
 
   let source = input.text;
   let headers = {};
@@ -281,6 +359,17 @@ async function loadAndParse(message, env) {
 
     source = result.text;
     headers = result.headers || {};
+  }
+
+  if (typeof source !== "string" || !source.trim()) {
+    throw new Error("输入内容为空。");
+  }
+
+  if (
+    new TextEncoder().encode(source).byteLength >
+    MAX_FILE_SIZE
+  ) {
+    throw new Error("输入内容超过大小限制。");
   }
 
   const parsed = parseInput(
@@ -299,7 +388,10 @@ async function loadAndParse(message, env) {
 // 接收 Telegram 更新
 // ======================================
 
-export async function handleTelegramUpdate(update, env) {
+export async function handleTelegramUpdate(
+  update,
+  env
+) {
   if (update.callback_query) {
     return handleCallback(
       update.callback_query,
@@ -322,9 +414,9 @@ export async function handleTelegramUpdate(update, env) {
   const chatType = message.chat.type;
 
   try {
-    // 群组必须先验证 Bot 自身管理员身份
+    // 群组必须验证 Bot 自身管理员身份
     if (chatType !== "private") {
-      let botAdmin;
+      let botAdmin = false;
 
       try {
         botAdmin = await isBotAdmin(
@@ -337,22 +429,12 @@ export async function handleTelegramUpdate(update, env) {
           error?.message || error
         );
 
-        await reply(
-          env,
-          chatId,
-          "无法验证 Bot 的群组管理员身份，请确认 Bot 已加入群组并被设置为管理员。"
-        );
-
+        // 无法验证时直接忽略，避免群组刷屏
         return;
       }
 
       if (!botAdmin) {
-        await reply(
-          env,
-          chatId,
-          "当前群组尚未授予 Bot 管理员权限。\n请先将 Bot 设置为群组管理员，再使用订阅查询功能。"
-        );
-
+        // Bot 不是管理员，不处理群组消息
         return;
       }
     }
@@ -398,11 +480,18 @@ export async function handleTelegramUpdate(update, env) {
       error?.stack || error
     );
 
-    await reply(
-      env,
-      chatId,
-      `解析失败：${escapeHtml(error.message || "未知错误")}`
-    );
+    try {
+      await reply(
+        env,
+        chatId,
+        `解析失败：${escapeHtml(error.message || "未知错误")}`
+      );
+    } catch (sendError) {
+      console.error(
+        "Parse error notification failed:",
+        sendError?.message || sendError
+      );
+    }
   }
 }
 
@@ -450,7 +539,10 @@ function buildPayload(parsed) {
 // 保存解析结果
 // ======================================
 
-async function storeParsed(parsed, env) {
+async function storeParsed(
+  parsed,
+  env
+) {
   if (!env.BOT_KV) {
     throw new Error("BOT_KV 未配置。");
   }
@@ -476,7 +568,15 @@ async function storeParsed(parsed, env) {
 // 更新解析缓存
 // ======================================
 
-async function updateParsed(key, parsed, env) {
+async function updateParsed(
+  key,
+  parsed,
+  env
+) {
+  if (!env.BOT_KV) {
+    throw new Error("BOT_KV 未配置。");
+  }
+
   await env.BOT_KV.put(
     `result:${key}`,
     JSON.stringify(buildPayload(parsed)),
@@ -491,7 +591,10 @@ async function updateParsed(key, parsed, env) {
 // ======================================
 
 function parseFullContent(data) {
-  if (!data.raw) {
+  if (
+    typeof data.raw !== "string" ||
+    !data.raw.trim()
+  ) {
     throw new Error(
       "原始订阅内容不存在，无法导出。"
     );
@@ -506,7 +609,9 @@ function parseFullContent(data) {
     !parsed.nodes ||
     !parsed.nodes.length
   ) {
-    throw new Error("没有可导出的节点。");
+    throw new Error(
+      "没有可导出的节点。"
+    );
   }
 
   return parsed;
@@ -544,7 +649,6 @@ async function toggleNodes(
 
 // ======================================
 // 额度释放
-// 仅用于尚未产生实际业务结果的失败
 // ======================================
 
 async function releaseUsage(
@@ -571,7 +675,6 @@ async function releaseUsage(
 
 // ======================================
 // 额度确认
-// 已完成的业务操作绝不主动释放额度
 // ======================================
 
 async function commitUsage(
@@ -604,7 +707,10 @@ async function commitUsage(
 // Callback 主处理
 // ======================================
 
-async function handleCallback(query, env) {
+async function handleCallback(
+  query,
+  env
+) {
   if (
     !query ||
     !query.message ||
@@ -643,9 +749,12 @@ async function handleCallback(query, env) {
   const userId = query.from.id;
 
   try {
+    // ==================================
     // 群组权限检查
+    // ==================================
+
     if (chatType !== "private") {
-      let botAdmin;
+      let botAdmin = false;
 
       try {
         botAdmin = await isBotAdmin(
@@ -661,7 +770,7 @@ async function handleCallback(query, env) {
         await answerCallback(
           env,
           query.id,
-          "无法验证 Bot 管理员身份，请检查 Bot 是否仍为群组管理员。",
+          "无法验证 Bot 管理员身份，请检查 Bot 权限。",
           true
         );
 
@@ -706,7 +815,14 @@ async function handleCallback(query, env) {
       }
     }
 
+    // ==================================
     // 读取解析缓存
+    // ==================================
+
+    if (!env.BOT_KV) {
+      throw new Error("BOT_KV 未配置。");
+    }
+
     const saved = await env.BOT_KV.get(
       `result:${key}`
     );
@@ -719,13 +835,18 @@ async function handleCallback(query, env) {
 
     const data = JSON.parse(saved);
 
+    // ==================================
     // 展开 / 折叠
+    // ==================================
+
     if (action === "toggle") {
       if (
         state !== "0" &&
         state !== "1"
       ) {
-        throw new Error("无效的展开状态。");
+        throw new Error(
+          "无效的展开状态。"
+        );
       }
 
       await toggleNodes(
@@ -739,7 +860,10 @@ async function handleCallback(query, env) {
       return;
     }
 
+    // ==================================
     // 生成操作指纹
+    // ==================================
+
     const fingerprint = await sha256(
       data.sourceUrl || data.raw
     );
@@ -747,7 +871,10 @@ async function handleCallback(query, env) {
     const usageKey =
       `${userId}:${fingerprint}`;
 
+    // ==================================
     // 原子领取额度
+    // ==================================
+
     const claim = await claimUsage(
       env,
       usageKey,
@@ -762,7 +889,8 @@ async function handleCallback(query, env) {
       await answerCallback(
         env,
         query.id,
-        claim?.error || "此用户对此订阅的该功能已经使用过一次，或操作正在处理中。",
+        claim?.error ||
+          "此用户对此订阅的该功能已经使用过一次，或操作正在处理中。",
         true
       );
 
@@ -771,7 +899,7 @@ async function handleCallback(query, env) {
 
     const token = claim.token;
 
-    // committed 表示实际业务结果已经产生
+    // 业务结果已经产生后，不再释放额度
     let committed = false;
 
     try {
@@ -817,7 +945,6 @@ async function handleCallback(query, env) {
           env
         );
 
-        // 缓存已经更新，不能再释放额度
         committed = true;
 
         await editMessage(
@@ -837,7 +964,9 @@ async function handleCallback(query, env) {
       else if (action === "base64") {
         const full = parseFullContent(data);
 
-        message = exportBase64(full.nodes);
+        message = exportBase64(
+          full.nodes
+        );
       }
 
       // ==================================
@@ -847,7 +976,9 @@ async function handleCallback(query, env) {
       else if (action === "yaml") {
         const full = parseFullContent(data);
 
-        message = exportYaml(full.nodes);
+        message = exportYaml(
+          full.nodes
+        );
       }
 
       // ==================================
@@ -867,7 +998,6 @@ async function handleCallback(query, env) {
           data.raw
         );
 
-        // 短链已经写入 KV
         committed = true;
 
         message =
@@ -885,14 +1015,14 @@ async function handleCallback(query, env) {
           data.sourceUrl || data.raw
         );
 
-        // 订阅已经写入 KV
         committed = true;
 
-        message = "订阅已保存到你的个人记录。";
+        message =
+          "订阅已保存到你的个人记录。";
       }
 
       // ==================================
-      // 发送结果或文件
+      // 发送结果
       // ==================================
 
       if (
@@ -938,7 +1068,6 @@ async function handleCallback(query, env) {
       );
 
     } catch (error) {
-      // 只有业务结果尚未产生时才能释放额度
       if (!committed) {
         await releaseUsage(
           env,
@@ -948,7 +1077,7 @@ async function handleCallback(query, env) {
         );
       } else {
         console.error(
-          "Operation completed but follow-up failed; usage will not be released:",
+          "Business result already created; usage not released:",
           error?.stack || error
         );
       }
@@ -978,7 +1107,7 @@ async function handleCallback(query, env) {
 async function deliver(
   env,
   chatId,
-  text,
+  content,
   action
 ) {
   if (
@@ -991,7 +1120,7 @@ async function deliver(
         : "config.yaml";
 
     const blob = new Blob(
-      [text],
+      [content],
       {
         type: "text/plain;charset=utf-8"
       }
@@ -1010,7 +1139,7 @@ async function deliver(
       filename
     );
 
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`,
       {
         method: "POST",
@@ -1043,7 +1172,7 @@ async function deliver(
   await reply(
     env,
     chatId,
-    text
+    content
   );
 }
 
