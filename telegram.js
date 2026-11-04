@@ -1,4 +1,3 @@
-
 import {
   parseInput,
   renderResult,
@@ -20,6 +19,20 @@ import {
   makeShort,
   saveSubscription
 } from "./short.js";
+
+// ================================
+// 基础配置
+// ================================
+
+function getMaxNodes(env) {
+  const value = Number(env.MAX_NODES || 1000);
+
+  if (!Number.isFinite(value) || value < 1) {
+    return 1000;
+  }
+
+  return Math.min(Math.floor(value), 1000);
+}
 
 // ================================
 // Telegram API
@@ -72,7 +85,14 @@ async function reply(env, chatId, text, extra = {}) {
 // 原消息编辑
 // ================================
 
-async function editMessage(env, chatId, messageId, text, key, expanded) {
+async function editMessage(
+  env,
+  chatId,
+  messageId,
+  text,
+  key,
+  expanded
+) {
   return telegram(env, "editMessageText", {
     chat_id: chatId,
     message_id: messageId,
@@ -87,7 +107,12 @@ async function editMessage(env, chatId, messageId, text, key, expanded) {
 // 回调提示
 // ================================
 
-async function answerCallback(env, callbackId, text = "", showAlert = false) {
+async function answerCallback(
+  env,
+  callbackId,
+  text = "",
+  showAlert = false
+) {
   try {
     await telegram(env, "answerCallbackQuery", {
       callback_query_id: callbackId,
@@ -95,7 +120,10 @@ async function answerCallback(env, callbackId, text = "", showAlert = false) {
       show_alert: showAlert
     });
   } catch (e) {
-    console.error("answerCallbackQuery error:", e?.message || e);
+    console.error(
+      "answerCallbackQuery error:",
+      e?.message || e
+    );
   }
 }
 
@@ -178,7 +206,7 @@ async function loadAndParse(message, env) {
 
   const parsed = parseInput(
     source,
-    Number(env.MAX_NODES || 500)
+    getMaxNodes(env)
   );
 
   parsed.sourceUrl = input.url || null;
@@ -238,6 +266,32 @@ export async function handleTelegramUpdate(update, env) {
 }
 
 // ================================
+// 统一缓存解析结果
+// ================================
+
+function buildPayload(parsed) {
+  return {
+    raw: parsed.raw,
+    sourceUrl: parsed.sourceUrl || null,
+    nodes: parsed.nodes || [],
+    headers: parsed.headers || {},
+
+    // 保存完整统计信息
+    totalCount: parsed.totalCount ?? parsed.nodes?.length ?? 0,
+    parsedCount: parsed.parsedCount ?? parsed.nodes?.length ?? 0,
+    truncatedCount: parsed.truncatedCount ?? 0,
+
+    duplicateCount: parsed.duplicateCount ?? 0,
+    uniqueCount: parsed.uniqueCount ?? 0,
+
+    protocolCounts: parsed.protocolCounts || {},
+    regionCounts: parsed.regionCounts || {},
+
+    createdAt: Date.now()
+  };
+}
+
+// ================================
 // 保存解析结果
 // ================================
 
@@ -246,13 +300,7 @@ async function storeParsed(parsed, env) {
     .replaceAll("-", "")
     .slice(0, 20);
 
-  const payload = {
-    raw: parsed.raw,
-    sourceUrl: parsed.sourceUrl,
-    nodes: parsed.nodes,
-    headers: parsed.headers || {},
-    createdAt: Date.now()
-  };
+  const payload = buildPayload(parsed);
 
   await env.BOT_KV.put(
     `result:${key}`,
@@ -270,13 +318,7 @@ async function storeParsed(parsed, env) {
 // ================================
 
 async function updateParsed(key, parsed, env) {
-  const payload = {
-    raw: parsed.raw,
-    sourceUrl: parsed.sourceUrl,
-    nodes: parsed.nodes,
-    headers: parsed.headers || {},
-    createdAt: Date.now()
-  };
+  const payload = buildPayload(parsed);
 
   await env.BOT_KV.put(
     `result:${key}`,
@@ -285,6 +327,28 @@ async function updateParsed(key, parsed, env) {
       expirationTtl: 86400
     }
   );
+}
+
+// ================================
+// 重新解析完整原始内容
+// 用于完整导出
+// ================================
+
+function parseFullContent(data) {
+  if (!data.raw) {
+    throw new Error("原始订阅内容不存在，无法导出。");
+  }
+
+  const parsed = parseInput(
+    data.raw,
+    Number.MAX_SAFE_INTEGER
+  );
+
+  if (!parsed.nodes || !parsed.nodes.length) {
+    throw new Error("没有可导出的节点。");
+  }
+
+  return parsed;
 }
 
 // ================================
@@ -342,7 +406,12 @@ async function handleCallback(q, env) {
     !allowedActions.includes(action) ||
     !/^[a-f0-9]{20}$/i.test(key || "")
   ) {
-    await answerCallback(env, q.id, "无效的操作请求。", true);
+    await answerCallback(
+      env,
+      q.id,
+      "无效的操作请求。",
+      true
+    );
     return;
   }
 
@@ -351,7 +420,10 @@ async function handleCallback(q, env) {
   const chatType = q.message.chat.type;
 
   try {
+    // ============================
     // 群组权限检查
+    // ============================
+
     if (
       chatType !== "private" &&
       !(await isAdmin(env, chatId, userId))
@@ -365,18 +437,25 @@ async function handleCallback(q, env) {
       return;
     }
 
+    // ============================
     // 读取解析结果
-    const saved = await env.BOT_KV.get(`result:${key}`);
+    // ============================
+
+    const saved = await env.BOT_KV.get(
+      `result:${key}`
+    );
 
     if (!saved) {
-      throw new Error("这份解析结果已过期，请重新发送订阅。");
+      throw new Error(
+        "这份解析结果已过期，请重新发送订阅。"
+      );
     }
 
     const data = JSON.parse(saved);
 
     // ============================
     // 展开 / 折叠
-    // 必须在限次系统之前处理
+    // 不消耗次数
     // ============================
 
     if (action === "toggle") {
@@ -384,7 +463,14 @@ async function handleCallback(q, env) {
         throw new Error("无效的展开状态。");
       }
 
-      await toggleNodes(q, env, key, state, data);
+      await toggleNodes(
+        q,
+        env,
+        key,
+        state,
+        data
+      );
+
       return;
     }
 
@@ -414,6 +500,9 @@ async function handleCallback(q, env) {
       return;
     }
 
+    // 保存本次操作凭证
+    const token = claim.token;
+
     try {
       let message = "";
 
@@ -423,7 +512,9 @@ async function handleCallback(q, env) {
 
       if (action === "refresh") {
         if (!data.sourceUrl) {
-          throw new Error("这不是订阅 URL，无法刷新。");
+          throw new Error(
+            "这不是订阅 URL，无法刷新。"
+          );
         }
 
         const fresh = await fetchSubscription(
@@ -433,18 +524,20 @@ async function handleCallback(q, env) {
 
         const parsed = parseInput(
           fresh.text,
-          Number(env.MAX_NODES || 500)
+          getMaxNodes(env)
         );
 
         if (!parsed.nodes.length) {
-          throw new Error("刷新后没有识别到节点。");
+          throw new Error(
+            "刷新后没有识别到节点。"
+          );
         }
 
         parsed.sourceUrl = data.sourceUrl;
         parsed.raw = fresh.text;
         parsed.headers = fresh.headers || {};
 
-        // 更新缓存
+        // 更新完整缓存
         await updateParsed(key, parsed, env);
 
         // 刷新后默认展开20个
@@ -465,18 +558,24 @@ async function handleCallback(q, env) {
 
       // ==========================
       // 导出 Base64
+      // 从原始内容重新解析全部节点
       // ==========================
 
       else if (action === "base64") {
-        message = exportBase64(data.nodes);
+        const full = parseFullContent(data);
+
+        message = exportBase64(full.nodes);
       }
 
       // ==========================
       // 导出 YAML
+      // 从原始内容重新解析全部节点
       // ==========================
 
       else if (action === "yaml") {
-        message = exportYaml(data.nodes);
+        const full = parseFullContent(data);
+
+        message = exportYaml(full.nodes);
       }
 
       // ==========================
@@ -485,7 +584,9 @@ async function handleCallback(q, env) {
 
       else if (action === "short") {
         if (!data.sourceUrl) {
-          throw new Error("只有订阅 URL 才能生成短链。");
+          throw new Error(
+            "只有订阅 URL 才能生成短链。"
+          );
         }
 
         const short = await makeShort(
@@ -512,18 +613,28 @@ async function handleCallback(q, env) {
       }
 
       // ==========================
-      // 发送导出文件或结果
+      // 发送文件或结果
       // ==========================
 
       if (message !== null && message !== "") {
-        await deliver(env, chatId, message, action);
+        await deliver(
+          env,
+          chatId,
+          message,
+          action
+        );
       }
 
+      // ==========================
       // 操作成功才消耗次数
+      // 必须传入 claim.token
+      // ==========================
+
       await finishUsage(
         env,
         usageKey,
         action,
+        token,
         true
       );
 
@@ -534,19 +645,30 @@ async function handleCallback(q, env) {
       );
 
     } catch (e) {
-      // 操作失败释放次数
-      await finishUsage(
-        env,
-        usageKey,
-        action,
-        false
-      );
+      // 失败释放次数
+      try {
+        await finishUsage(
+          env,
+          usageKey,
+          action,
+          token,
+          false
+        );
+      } catch (finishError) {
+        console.error(
+          "release usage error:",
+          finishError?.message || finishError
+        );
+      }
 
       throw e;
     }
 
   } catch (e) {
-    console.error("callback error:", e?.stack || e);
+    console.error(
+      "callback error:",
+      e?.stack || e
+    );
 
     await answerCallback(
       env,
@@ -588,7 +710,13 @@ async function deliver(env, chatId, text, action) {
       }
     );
 
-    const j = await r.json();
+    let j;
+
+    try {
+      j = await r.json();
+    } catch {
+      throw new Error("Telegram 文件发送返回异常。");
+    }
 
     if (!r.ok || !j.ok) {
       throw new Error(
