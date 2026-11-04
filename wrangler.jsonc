@@ -1,17 +1,21 @@
+
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "telegram-subscription-parser",
   "main": "index.js",
   "compatibility_date": "2026-11-05",
+
   "observability": {
     "enabled": true
   },
+
   "kv_namespaces": [
     {
       "binding": "BOT_KV",
-      "id": "在Cloudflare创建KV后填写ID"
+      "id": "替换成Cloudflare实际KV_ID"
     }
   ],
+
   "durable_objects": {
     "bindings": [
       {
@@ -20,15 +24,19 @@
       }
     ]
   },
+
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["UsageGuard"]
+      "new_sqlite_classes": [
+        "UsageGuard"
+      ]
     }
   ],
+
   "vars": {
     "MAX_INPUT_BYTES": "1048576",
     "MAX_NODES": "1000",
-    "SHORT_BASE_URL": "https://你的worker域名"
+    "SHORT_BASE_URL": "https://替换成你的Worker域名"
   }
 }
