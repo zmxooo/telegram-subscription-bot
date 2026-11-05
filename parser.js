@@ -1,3 +1,4 @@
+
 import YAML from "yaml";
 
 // ======================================
@@ -35,7 +36,6 @@ function protocolLabel(type) {
 
 // ======================================
 // 主解析入口
-// 默认最多缓存 1000 个节点
 // 重复节点不删除，只统计
 // ======================================
 
@@ -74,7 +74,6 @@ export function parseInput(input, maxNodes = 1000) {
       if (!isSupportedUri(line)) continue;
 
       const node = parseUri(line);
-
       if (node) nodes.push(node);
     }
   }
@@ -955,7 +954,10 @@ export function renderResult(p, nodeLimit = 20) {
   const protocols = p.protocolCounts || {};
   const regions = p.regionCounts || {};
 
+  // ======================================
   // 兼容旧缓存
+  // ======================================
+
   if (!p.protocolCounts || !p.regionCounts) {
     for (const n of nodes) {
       if (!p.protocolCounts) {
@@ -1005,8 +1007,6 @@ export function renderResult(p, nodeLimit = 20) {
 
   const regionTotal = regionEntries.length;
 
-  // 国旗 + 地区名称 + 数量
-  // 地区之间只保留一个空格，不使用斜杠
   const regionText = regionEntries
     .map(([name, count]) => {
       return `${flag(name)}${escapeHtml(name)}${count}`;
@@ -1015,7 +1015,6 @@ export function renderResult(p, nodeLimit = 20) {
 
   // ======================================
   // 协议类型
-  // 去重显示，不显示数量
   // ======================================
 
   const protocolNames = [...new Set(
@@ -1060,8 +1059,15 @@ export function renderResult(p, nodeLimit = 20) {
 
   // ======================================
   // 节点列表
-  // 国旗和协议之间不留空格
-  // 协议和原始节点备注之间保留一个空格
+  //
+  // 未知地区：🌐SS📢:每日更新
+  // 已知地区：🇩🇪AnyTLS 德国01 @clashv8
+  //
+  // 旗帜与协议之间不加空格
+  // 未知地区协议后不加空格
+  // 已知地区协议后只加一个空格
+  // 删除备注开头重复的地区国旗
+  // 不修改其他原始节点名称
   // ======================================
 
   const visibleNodes = nodes.slice(0, limit);
@@ -1073,11 +1079,24 @@ export function renderResult(p, nodeLimit = 20) {
 
   const nodeLines = visibleNodes.map((n, index) => {
     const r = region(n.name);
+    const regionFlag = flag(r);
+
+    let name = String(n.name || "");
+
+    // 只删除备注开头重复的地区国旗
+    if (r !== "未知" && name.startsWith(regionFlag)) {
+      name = name.slice(regionFlag.length).trimStart();
+    }
+
+    // 未知地区不添加空格
+    // 已知地区只添加一个空格
+    const separator = r === "未知" ? "" : " ";
 
     return (
-      `${index + 1}. ${flag(r)}` +
-      `<code>${escapeHtml(protocolLabel(n.type))}</code> ` +
-      `${escapeHtml(n.name)}`
+      `${index + 1}. ${regionFlag}` +
+      `${escapeHtml(protocolLabel(n.type))}` +
+      `${separator}` +
+      `${escapeHtml(name)}`
     );
   });
 
@@ -1111,7 +1130,7 @@ export function renderResult(p, nodeLimit = 20) {
     "🌍 <b>地区分布</b>",
     regionText || "🌐未知0",
     "────────────",
-    `📋 <b>节点列表</b> <code>${visibleNodes.length}/${totalCount}</code>`
+    `📋 <b>节点列表</b> ${visibleNodes.length}/${totalCount}`
   ];
 
   if (nodeLines.length) {
