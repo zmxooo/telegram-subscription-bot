@@ -37,6 +37,6 @@
   "vars": {
     "MAX_INPUT_BYTES": "1048576",
     "MAX_NODES": "1000",
-    "SHORT_BASE_URL": "https://替换成你的Worker域名"
+    "SHORT_BASE_URL": "https://telegram-subscription-parser.a147111-2024.workers.dev"
   }
 }
