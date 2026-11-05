@@ -1,4 +1,3 @@
-
 import { handleTelegramUpdate, telegram } from "./telegram.js";
 import { handleShortLink } from "./short.js";
 
@@ -385,7 +384,9 @@ async function handleSetWebhook(request, url, env) {
       }
     );
 
-    if (!result || result.ok !== true) {
+    // telegram() 返回 data.result。
+    // setWebhook 成功时，Telegram 返回的 result 是 true。
+    if (result !== true) {
       console.error(
         "Telegram rejected setWebhook:",
         result
@@ -395,7 +396,7 @@ async function handleSetWebhook(request, url, env) {
         {
           ok: false,
           error: "Telegram 设置 Webhook 失败",
-          telegram: result || null
+          telegram: result ?? null
         },
         502
       );
@@ -406,6 +407,7 @@ async function handleSetWebhook(request, url, env) {
       message: "Webhook 设置成功",
       webhook: webhookUrl
     });
+
   } catch (error) {
     console.error(
       "Set webhook failed:",
@@ -475,6 +477,7 @@ export default {
       return textResponse(
         "Telegram subscription parser is running."
       );
+
     } catch (error) {
       console.error(
         "Worker request failed:",
