@@ -28,6 +28,18 @@ import {
 const API_TIMEOUT = 15000;
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
 
+// ======================================
+// 短链和保存订阅专属授权名单
+//
+// 添加新用户时，只需要在这里增加数字 ID
+// 只影响 short 和 save 两个功能
+// ======================================
+
+const OWNER_IDS = new Set([
+  "8556869794",
+  "8471743937"
+]);
+
 function getMaxNodes(env) {
   const value = Number(env.MAX_NODES || 1000);
 
@@ -43,6 +55,11 @@ const ALLOWED_ACTIONS = new Set([
   "toggle",
   "base64",
   "yaml",
+  "short",
+  "save"
+]);
+
+const OWNER_ONLY_ACTIONS = new Set([
   "short",
   "save"
 ]);
@@ -204,6 +221,14 @@ async function isAdmin(
     "creator",
     "administrator"
   ].includes(member.status);
+}
+
+// ======================================
+// 检查用户是否有专属授权
+// ======================================
+
+function isOwnerAuthorized(userId) {
+  return OWNER_IDS.has(String(userId));
 }
 
 // ======================================
@@ -429,12 +454,10 @@ export async function handleTelegramUpdate(
           error?.message || error
         );
 
-        // 无法验证时直接忽略，避免群组刷屏
         return;
       }
 
       if (!botAdmin) {
-        // Bot 不是管理员，不处理群组消息
         return;
       }
     }
@@ -750,6 +773,27 @@ async function handleCallback(
 
   try {
     // ==================================
+    // 专属授权检查
+    //
+    // short 和 save 仅允许 OWNER_IDS
+    // 不受群组管理员身份影响
+    // ==================================
+
+    if (
+      OWNER_ONLY_ACTIONS.has(action) &&
+      !isOwnerAuthorized(userId)
+    ) {
+      await answerCallback(
+        env,
+        query.id,
+        "⛔ 此功能仅限授权用户使用。",
+        true
+      );
+
+      return;
+    }
+
+    // ==================================
     // 群组权限检查
     // ==================================
 
@@ -788,30 +832,34 @@ async function handleCallback(
         return;
       }
 
-      let userAdmin = false;
+      // 短链和保存功能的授权用户不需要群管理员身份
+      // 其他四个功能仍然要求群组管理员
+      if (!OWNER_ONLY_ACTIONS.has(action)) {
+        let userAdmin = false;
 
-      try {
-        userAdmin = await isAdmin(
-          env,
-          chatId,
-          userId
-        );
-      } catch (error) {
-        console.error(
-          "User admin check error:",
-          error?.message || error
-        );
-      }
+        try {
+          userAdmin = await isAdmin(
+            env,
+            chatId,
+            userId
+          );
+        } catch (error) {
+          console.error(
+            "User admin check error:",
+            error?.message || error
+          );
+        }
 
-      if (!userAdmin) {
-        await answerCallback(
-          env,
-          query.id,
-          "只有群组管理员可以使用此功能。",
-          true
-        );
+        if (!userAdmin) {
+          await answerCallback(
+            env,
+            query.id,
+            "只有群组管理员可以使用此功能。",
+            true
+          );
 
-        return;
+          return;
+        }
       }
     }
 
@@ -899,7 +947,6 @@ async function handleCallback(
 
     const token = claim.token;
 
-    // 业务结果已经产生后，不再释放额度
     let committed = false;
 
     try {
