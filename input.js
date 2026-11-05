@@ -30,7 +30,6 @@ const ALLOWED_PORTS = new Set([
 
 // ======================================
 // 请求头策略
-// 403 / 406 时尝试不同的正常客户端请求方式
 // ======================================
 
 const REQUEST_PROFILES = [
@@ -95,11 +94,13 @@ async function fetchWithTimeout(
   } catch (error) {
     if (error?.name === "AbortError") {
       throw new Error(
-        "请求超时，请稍后重试。"
+        `请求超时（${timeout / 1000} 秒）。`
       );
     }
 
-    throw error;
+    throw new Error(
+      `网络请求失败：${error?.message || String(error)}`
+    );
   } finally {
     clearTimeout(timer);
   }
@@ -200,9 +201,7 @@ function isPublicIPv4(host) {
   ];
 
   for (const [network, prefix] of blockedRanges) {
-    if (
-      inIPv4Range(value, network, prefix)
-    ) {
+    if (inIPv4Range(value, network, prefix)) {
       return false;
     }
   }
@@ -227,10 +226,7 @@ function isIpAddress(host) {
     return true;
   }
 
-  // 拒绝数字、十六进制等非标准 IP 表示
-  if (
-    /^(?:0x[0-9a-f]+|[0-9]+)$/i.test(value)
-  ) {
+  if (/^(?:0x[0-9a-f]+|[0-9]+)$/i.test(value)) {
     return true;
   }
 
@@ -312,9 +308,7 @@ function validateSubscriptionUrl(input) {
     !input.trim() ||
     input.length > MAX_URL_LENGTH
   ) {
-    throw new Error(
-      "订阅 URL 格式不正确。"
-    );
+    throw new Error("订阅 URL 格式不正确。");
   }
 
   let url;
@@ -322,9 +316,7 @@ function validateSubscriptionUrl(input) {
   try {
     url = new URL(input.trim());
   } catch {
-    throw new Error(
-      "订阅 URL 格式不正确。"
-    );
+    throw new Error("订阅 URL 格式不正确。");
   }
 
   if (
@@ -347,9 +339,7 @@ function validateSubscriptionUrl(input) {
     .replace(/\.$/, "");
 
   if (!host) {
-    throw new Error(
-      "订阅地址缺少有效域名。"
-    );
+    throw new Error("订阅地址缺少有效域名。");
   }
 
   if (isIpAddress(host)) {
@@ -416,9 +406,7 @@ async function readLimitedText(
   }
 
   if (!response.body) {
-    throw new Error(
-      "服务器没有返回有效内容。"
-    );
+    throw new Error("服务器没有返回有效内容。");
   }
 
   const reader = response.body.getReader();
@@ -493,9 +481,7 @@ async function tg(
   body = {}
 ) {
   if (!env.BOT_TOKEN) {
-    throw new Error(
-      "BOT_TOKEN 未配置。"
-    );
+    throw new Error("BOT_TOKEN 未配置。");
   }
 
   let response;
@@ -511,9 +497,9 @@ async function tg(
         body: JSON.stringify(body)
       }
     );
-  } catch {
+  } catch (error) {
     throw new Error(
-      "连接 Telegram API 失败或请求超时。"
+      `连接 Telegram API 失败：${error.message}`
     );
   }
 
@@ -618,9 +604,7 @@ export async function extractMessageInput(
       .byteLength;
 
     if (byteLength > MAX) {
-      throw new Error(
-        "输入内容超过大小限制。"
-      );
+      throw new Error("输入内容超过大小限制。");
     }
 
     const url = extractSubscriptionUrl(text);
@@ -648,9 +632,7 @@ export async function extractMessageInput(
       typeof doc.file_id !== "string" ||
       !doc.file_id
     ) {
-      throw new Error(
-        "文件信息不正确。"
-      );
+      throw new Error("文件信息不正确。");
     }
 
     if (
@@ -663,9 +645,7 @@ export async function extractMessageInput(
         !Number.isSafeInteger(fileSize) ||
         fileSize < 0
       ) {
-        throw new Error(
-          "文件大小信息不正确。"
-        );
+        throw new Error("文件大小信息不正确。");
       }
 
       if (fileSize > MAX) {
@@ -743,9 +723,9 @@ export async function extractMessageInput(
           redirect: "manual"
         }
       );
-    } catch {
+    } catch (error) {
       throw new Error(
-        "Telegram 文件下载失败或请求超时。"
+        `Telegram 文件下载失败：${error.message}`
       );
     }
 
@@ -772,9 +752,7 @@ export async function extractMessageInput(
     );
 
     if (!text.trim()) {
-      throw new Error(
-        "文件内容为空。"
-      );
+      throw new Error("文件内容为空。");
     }
 
     return {
@@ -789,11 +767,37 @@ export async function extractMessageInput(
 }
 
 // ======================================
+// HTTP 错误信息
+// ======================================
+
+function getResponseError(response) {
+  const status = response.status;
+
+  const server =
+    response.headers.get("server") || "未知";
+
+  const contentType =
+    response.headers.get("content-type") || "未知";
+
+  const requestId =
+    response.headers.get("cf-ray") ||
+    response.headers.get("x-request-id") ||
+    response.headers.get("x-trace-id") ||
+    "无";
+
+  return new Error(
+    `HTTP ${status}；服务器：${server}；Content-Type：${contentType}；请求追踪 ID：${requestId}`
+  );
+}
+
+// ======================================
 // 多策略请求订阅服务器
+// 保留最终 HTTP 状态和诊断信息
 // ======================================
 
 async function requestSubscription(url) {
-  let lastError = null;
+  let lastNetworkError = null;
+  let lastHttpError = null;
 
   for (
     let profileIndex = 0;
@@ -818,8 +822,10 @@ async function requestSubscription(url) {
             headers
           }
         );
+
+        lastNetworkError = null;
       } catch (error) {
-        lastError = error;
+        lastNetworkError = error;
 
         // 网络错误最多重试一次
         if (retry < 1) {
@@ -829,7 +835,7 @@ async function requestSubscription(url) {
         break;
       }
 
-      // 成功或重定向，直接交给上层处理
+      // 成功或重定向，直接交给上层
       if (
         response.ok ||
         REDIRECT_STATUSES.has(response.status)
@@ -837,24 +843,18 @@ async function requestSubscription(url) {
         return response;
       }
 
-      // 403 / 406 尝试下一组请求头
-      if (
-        RETRY_HEADER_STATUSES.has(response.status)
-      ) {
+      // 403 / 406：尝试下一种请求方式
+      if (RETRY_HEADER_STATUSES.has(response.status)) {
+        lastHttpError = getResponseError(response);
+
         await response.body?.cancel().catch(() => {});
-        lastError = new Error(
-          `HTTP ${response.status}`
-        );
+
         break;
       }
 
-      // 服务器临时错误，有限重试
-      if (
-        RETRY_STATUSES.has(response.status)
-      ) {
-        lastError = new Error(
-          `HTTP ${response.status}`
-        );
+      // 服务器临时错误：有限重试
+      if (RETRY_STATUSES.has(response.status)) {
+        lastHttpError = getResponseError(response);
 
         await response.body?.cancel().catch(() => {});
 
@@ -870,12 +870,18 @@ async function requestSubscription(url) {
     }
   }
 
-  if (lastError) {
-    throw lastError;
+  // 优先保留服务器明确返回的 HTTP 状态
+  if (lastHttpError) {
+    throw lastHttpError;
+  }
+
+  // 所有请求方式都无法建立连接
+  if (lastNetworkError) {
+    throw lastNetworkError;
   }
 
   throw new Error(
-    "订阅服务器暂时无法访问。"
+    "订阅服务器暂时无法访问，未收到有效 HTTP 响应。"
   );
 }
 
@@ -914,23 +920,14 @@ export async function fetchSubscription(
     try {
       response = await requestSubscription(current);
     } catch (error) {
-      if (
-        error?.message ===
-        "请求超时，请稍后重试。"
-      ) {
-        throw error;
-      }
-
       throw new Error(
-        "订阅下载失败：网络连接失败或服务器暂时不可用。"
+        `订阅下载失败：${error?.message || String(error)}`
       );
     }
 
     // 处理重定向
     if (REDIRECT_STATUSES.has(response.status)) {
-      const location = response.headers.get(
-        "location"
-      );
+      const location = response.headers.get("location");
 
       await response.body?.cancel().catch(() => {});
 
@@ -967,9 +964,10 @@ export async function fetchSubscription(
       continue;
     }
 
-    // 处理异常状态
+    // 处理异常 HTTP 状态
     if (!response.ok) {
       const status = response.status;
+
       const server =
         response.headers.get("server") || "未知";
 
@@ -992,7 +990,7 @@ export async function fetchSubscription(
 
       if (status === 403) {
         throw new Error(
-          `订阅服务器拒绝访问（403）。服务器：${server}；请求追踪：${requestId}。已尝试多种请求方式，可能存在来源 IP 或访问权限限制。`
+          `订阅服务器拒绝访问（403）。服务器：${server}；请求追踪 ID：${requestId}。可能存在来源 IP 或访问权限限制。`
         );
       }
 
@@ -1009,7 +1007,7 @@ export async function fetchSubscription(
       }
 
       throw new Error(
-        `订阅服务器返回 HTTP ${status}，服务器：${server}，Content-Type：${contentType}。`
+        `订阅服务器返回 HTTP ${status}；服务器：${server}；Content-Type：${contentType}；请求追踪 ID：${requestId}。`
       );
     }
 
