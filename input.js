@@ -6,17 +6,30 @@ const MAX_URL_LENGTH = 4096;
 const MAX_REDIRECTS = 5;
 
 const REDIRECT_STATUSES = new Set([
-  301,
-  302,
-  303,
-  307,
-  308
+  301, 302, 303, 307, 308
 ]);
 
+// 常见订阅文件格式
 const ALLOWED_FILE_EXTENSIONS = new Set([
   "txt",
   "yaml",
-  "yml"
+  "yml",
+  "json",
+  "conf",
+  "ini",
+  "list"
+]);
+
+// 允许的常见 HTTP 服务端口
+const ALLOWED_PORTS = new Set([
+  "80",
+  "443",
+  "8080",
+  "8443",
+  "2053",
+  "2083",
+  "2087",
+  "2096"
 ]);
 
 // ======================================
@@ -64,7 +77,9 @@ async function fetchWithTimeout(
     });
   } catch (error) {
     if (error?.name === "AbortError") {
-      throw new Error("请求超时，请稍后重试。");
+      throw new Error(
+        "请求超时，请稍后重试。"
+      );
     }
 
     throw error;
@@ -74,7 +89,113 @@ async function fetchWithTimeout(
 }
 
 // ======================================
-// IP 地址检查
+// IPv4 转数字
+// ======================================
+
+function ipv4ToNumber(host) {
+  const parts = String(host || "").split(".");
+
+  if (parts.length !== 4) {
+    return null;
+  }
+
+  const numbers = parts.map(part => {
+    if (!/^\d+$/.test(part)) {
+      return NaN;
+    }
+
+    return Number(part);
+  });
+
+  if (
+    numbers.some(
+      n =>
+        !Number.isInteger(n) ||
+        n < 0 ||
+        n > 255
+    )
+  ) {
+    return null;
+  }
+
+  return (
+    numbers[0] * 16777216 +
+    numbers[1] * 65536 +
+    numbers[2] * 256 +
+    numbers[3]
+  );
+}
+
+// ======================================
+// CIDR 判断
+// ======================================
+
+function inIPv4Range(ip, network, prefix) {
+  const ipNumber = ipv4ToNumber(ip);
+  const networkNumber = ipv4ToNumber(network);
+
+  if (
+    ipNumber === null ||
+    networkNumber === null
+  ) {
+    return false;
+  }
+
+  const blockSize = 2 ** (32 - prefix);
+
+  return (
+    Math.floor(ipNumber / blockSize) ===
+    Math.floor(networkNumber / blockSize)
+  );
+}
+
+// ======================================
+// 判断是否为公网 IPv4
+// ======================================
+
+function isPublicIPv4(host) {
+  const value = String(host || "");
+
+  if (ipv4ToNumber(value) === null) {
+    return false;
+  }
+
+  // 特殊用途、私有、保留及非公网地址段
+  const blockedRanges = [
+    ["0.0.0.0", 8],
+    ["10.0.0.0", 8],
+    ["100.64.0.0", 10],
+    ["127.0.0.0", 8],
+    ["169.254.0.0", 16],
+    ["172.16.0.0", 12],
+
+    ["192.0.0.0", 24],
+    ["192.0.2.0", 24],
+    ["192.88.99.0", 24],
+    ["192.168.0.0", 16],
+
+    ["198.18.0.0", 15],
+    ["198.51.100.0", 24],
+
+    ["203.0.113.0", 24],
+
+    ["224.0.0.0", 4],
+    ["240.0.0.0", 4]
+  ];
+
+  for (const [network, prefix] of blockedRanges) {
+    if (
+      inIPv4Range(value, network, prefix)
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// ======================================
+// 判断是否为 IP 地址
 // ======================================
 
 function isIpAddress(host) {
@@ -88,16 +209,85 @@ function isIpAddress(host) {
   }
 
   // 标准 IPv4
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) {
+  if (ipv4ToNumber(value) !== null) {
     return true;
   }
 
-  // 十进制、十六进制等数字形式
-  if (/^(?:0x[0-9a-f]+|[0-9]+)$/i.test(value)) {
+  // 数字、十六进制及非标准 IP 表示
+  if (
+    /^(?:0x[0-9a-f]+|[0-9]+)$/i.test(value)
+  ) {
     return true;
   }
 
   return false;
+}
+
+// ======================================
+// 域名检查
+// ======================================
+
+function isValidPublicHostname(host) {
+  if (
+    !host ||
+    host.length > 253 ||
+    !host.includes(".")
+  ) {
+    return false;
+  }
+
+  // 禁止本地及特殊用途域名
+  const blockedHosts = new Set([
+    "localhost",
+    "metadata.google",
+    "metadata.google.internal"
+  ]);
+
+  const blockedSuffixes = [
+    ".localhost",
+    ".local",
+    ".internal",
+    ".home",
+    ".lan",
+    ".test",
+    ".example",
+    ".invalid",
+    ".onion",
+    ".arpa"
+  ];
+
+  if (blockedHosts.has(host)) {
+    return false;
+  }
+
+  if (
+    blockedSuffixes.some(
+      suffix => host.endsWith(suffix)
+    )
+  ) {
+    return false;
+  }
+
+  // 域名字符检查
+  if (!/^[a-z0-9.-]+$/i.test(host)) {
+    return false;
+  }
+
+  const labels = host.split(".");
+
+  if (
+    labels.some(
+      label =>
+        !label ||
+        label.length > 63 ||
+        label.startsWith("-") ||
+        label.endsWith("-")
+    )
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
 // ======================================
@@ -110,7 +300,9 @@ function validateSubscriptionUrl(input) {
     !input.trim() ||
     input.length > MAX_URL_LENGTH
   ) {
-    throw new Error("订阅 URL 格式不正确。");
+    throw new Error(
+      "订阅 URL 格式不正确。"
+    );
   }
 
   let url;
@@ -118,60 +310,66 @@ function validateSubscriptionUrl(input) {
   try {
     url = new URL(input.trim());
   } catch {
-    throw new Error("订阅 URL 格式不正确。");
+    throw new Error(
+      "订阅 URL 格式不正确。"
+    );
   }
 
-  // 只允许 HTTPS
-  if (url.protocol !== "https:") {
-    throw new Error("仅允许 HTTPS 订阅地址。");
+  // 允许 HTTP 和 HTTPS
+  if (
+    url.protocol !== "https:" &&
+    url.protocol !== "http:"
+  ) {
+    throw new Error(
+      "仅支持 HTTP 或 HTTPS 订阅地址。"
+    );
   }
 
   // 禁止 URL 用户名和密码
   if (url.username || url.password) {
-    throw new Error("URL 不允许包含用户名或密码。");
+    throw new Error(
+      "URL 不允许包含用户名或密码。"
+    );
   }
 
   const host = url.hostname
     .toLowerCase()
     .replace(/\.$/, "");
 
-  // 禁止 IP 和本地域名
+  if (!host) {
+    throw new Error(
+      "订阅地址缺少有效域名。"
+    );
+  }
+
+  // IP 地址单独处理
+  if (isIpAddress(host)) {
+    // 只允许公网 IPv4
+    if (!isPublicIPv4(host)) {
+      throw new Error(
+        "不允许访问私有、保留或非公网 IP 地址。"
+      );
+    }
+  } else {
+    // 普通域名检查
+    if (!isValidPublicHostname(host)) {
+      throw new Error(
+        "订阅地址必须使用有效的公网域名。"
+      );
+    }
+  }
+
+  // 只开放常见 Web 端口
   if (
-    !host ||
-    isIpAddress(host) ||
-    host === "localhost" ||
-    host.endsWith(".localhost") ||
-    host.endsWith(".local") ||
-    host.endsWith(".internal") ||
-    host.endsWith(".home") ||
-    host.endsWith(".lan") ||
-    host.endsWith(".test") ||
-    host.endsWith(".example") ||
-    host.endsWith(".invalid") ||
-    host.endsWith(".onion") ||
-    host === "metadata.google.internal" ||
-    host === "metadata.google"
+    url.port &&
+    !ALLOWED_PORTS.has(url.port)
   ) {
     throw new Error(
-      "不允许访问 IP 地址或本地域名。"
+      "订阅地址使用了不允许的端口。"
     );
   }
 
-  // 必须使用正常公网域名
-  if (!host.includes(".")) {
-    throw new Error(
-      "订阅地址必须使用有效的公网域名。"
-    );
-  }
-
-  // 只允许 HTTPS 默认端口
-  if (url.port && url.port !== "443") {
-    throw new Error(
-      "订阅地址仅允许 HTTPS 默认端口 443。"
-    );
-  }
-
-  // 移除 URL 锚点
+  // 移除锚点
   url.hash = "";
 
   return url;
@@ -256,7 +454,12 @@ async function readLimitedText(
     }
   } finally {
     clearTimeout(timer);
-    reader.releaseLock();
+
+    try {
+      reader.releaseLock();
+    } catch {
+      // 忽略释放锁时的异常
+    }
   }
 
   if (timedOut) {
@@ -292,7 +495,9 @@ async function tg(
   body = {}
 ) {
   if (!env.BOT_TOKEN) {
-    throw new Error("BOT_TOKEN 未配置。");
+    throw new Error(
+      "BOT_TOKEN 未配置。"
+    );
   }
 
   let response;
@@ -347,8 +552,9 @@ function extractSubscriptionUrl(text) {
     return null;
   }
 
+  // HTTP / HTTPS 均可
   const matches = [
-    ...text.matchAll(/https:\/\/[^\s<>"']+/gi)
+    ...text.matchAll(/https?:\/\/[^\s<>"']+/gi)
   ];
 
   // 必须只有一条 URL
@@ -370,7 +576,10 @@ function extractSubscriptionUrl(text) {
 
   const start = matches[0].index;
 
-  if (typeof start !== "number" || start < 0) {
+  if (
+    typeof start !== "number" ||
+    start < 0
+  ) {
     return null;
   }
 
@@ -388,11 +597,6 @@ function extractSubscriptionUrl(text) {
       remaining
     )
   ) {
-    return null;
-  }
-
-  // 避免普通长文本误识别
-  if (remaining.length > 100) {
     return null;
   }
 
@@ -484,7 +688,7 @@ export async function extractMessageInput(
       }
     }
 
-    // 只接受 TXT 和 YAML
+    // 检查文件格式
     const fileName = String(
       doc.file_name || ""
     );
@@ -498,7 +702,7 @@ export async function extractMessageInput(
       !ALLOWED_FILE_EXTENSIONS.has(extension)
     ) {
       throw new Error(
-        "文件格式不支持，请发送 TXT 或 YAML 文件。"
+        "文件格式不支持，请发送 TXT、YAML、JSON 或配置文件。"
       );
     }
 
@@ -561,6 +765,7 @@ export async function extractMessageInput(
       );
     }
 
+    // Telegram 文件下载不跟随未知跳转
     if (REDIRECT_STATUSES.has(response.status)) {
       await response.body?.cancel().catch(() => {});
 
@@ -596,7 +801,7 @@ export async function extractMessageInput(
   }
 
   throw new Error(
-    "请发送文字、订阅链接或 TXT/YAML 文件。"
+    "请发送文字、订阅链接或 TXT/YAML/JSON 文件。"
   );
 }
 
@@ -691,13 +896,6 @@ export async function fetchSubscription(
       let nextUrl;
 
       try {
-        // 支持：
-        // https://example.com/next
-        // /next
-        // ../next
-        // ?token=123
-        // //example.com/next
-
         nextUrl = new URL(
           location.trim(),
           currentUrl
@@ -708,7 +906,7 @@ export async function fetchSubscription(
         );
       }
 
-      // 每次跳转都重新检查 HTTPS 和域名
+      // 每次跳转都重新进行安全检查
       currentUrl = validateSubscriptionUrl(
         nextUrl.toString()
       );
@@ -728,7 +926,6 @@ export async function fetchSubscription(
       );
     }
 
-    // 非重定向，获取最终响应
     break;
   }
 
