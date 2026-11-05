@@ -1,4 +1,3 @@
-
 import YAML from "yaml";
 
 // ======================================
@@ -987,26 +986,38 @@ export function renderResult(p, nodeLimit = 20) {
   const truncatedCount =
     p.truncatedCount ?? Math.max(0, parsedCount - nodes.length);
 
+  // ======================================
   // 流量信息
+  // ======================================
+
   const info = parseUserinfo(
     p.headers?.userinfo ||
     p.headers?.["subscription-userinfo"] ||
     p.headers?.["Subscription-Userinfo"]
   );
 
+  // ======================================
   // 地区统计
+  // ======================================
+
   const regionEntries = Object.entries(regions)
     .sort((a, b) => b[1] - a[1]);
 
   const regionTotal = regionEntries.length;
 
+  // 国旗 + 地区名称 + 数量
+  // 地区之间只保留一个空格，不使用斜杠
   const regionText = regionEntries
     .map(([name, count]) => {
-      return `${flag(name)} ${escapeHtml(name)} <b>${count}</b>`;
+      return `${flag(name)}${escapeHtml(name)}${count}`;
     })
-    .join("　");
+    .join(" ");
 
-  // 协议类型：去重显示，不显示数量
+  // ======================================
+  // 协议类型
+  // 去重显示，不显示数量
+  // ======================================
+
   const protocolNames = [...new Set(
     Object.keys(protocols).map(protocolLabel)
   )];
@@ -1015,14 +1026,20 @@ export function renderResult(p, nodeLimit = 20) {
     ? protocolNames.map(escapeHtml).join("、")
     : "未知";
 
+  // ======================================
   // 订阅链接
+  // ======================================
+
   let subscriptionText = "未提供";
 
   if (p.sourceUrl) {
     try {
       const url = new URL(p.sourceUrl);
 
-      if (url.protocol === "http:" || url.protocol === "https:") {
+      if (
+        url.protocol === "http:" ||
+        url.protocol === "https:"
+      ) {
         subscriptionText =
           `<a href="${escapeHtml(url.href)}">点击查看原始订阅链接</a>`;
       } else {
@@ -1033,12 +1050,20 @@ export function renderResult(p, nodeLimit = 20) {
     }
   }
 
+  // ======================================
   // 机场名称
+  // ======================================
+
   const airportName = escapeHtml(
     getAirportName(p.sourceUrl)
   );
 
-  // 节点显示
+  // ======================================
+  // 节点列表
+  // 国旗和协议之间不留空格
+  // 协议和原始节点备注之间保留一个空格
+  // ======================================
+
   const visibleNodes = nodes.slice(0, limit);
 
   const hiddenCachedCount = Math.max(
@@ -1050,26 +1075,29 @@ export function renderResult(p, nodeLimit = 20) {
     const r = region(n.name);
 
     return (
-      `${index + 1}. ${flag(r)} ` +
+      `${index + 1}. ${flag(r)}` +
       `<code>${escapeHtml(protocolLabel(n.type))}</code> ` +
       `${escapeHtml(n.name)}`
     );
   });
 
+  // ======================================
   // 组装消息
+  // ======================================
+
   const lines = [
     "📡 <b>订阅解析报告</b>",
     "<i>SUBSCRIPTION ANALYSIS</i>",
-    "────────────",
-    "📦 <b>订阅信息</b>",
-    `机场名称：<b>${airportName}</b>`,
-    `订阅链接：${subscriptionText}`,
     "────────────",
     "💳 <b>流量信息</b>",
     `总流量：<b>${info?.total || "未知"}</b>`,
     `已用流量：<b>${info?.used || "未知"}</b>`,
     `剩余流量：<b>${info?.remaining || "未知"}</b>`,
     `到期时间：<b>${info?.expire || "未知"}</b>`,
+    "────────────",
+    "📦 <b>订阅信息</b>",
+    `机场名称：<b>${airportName}</b>`,
+    `订阅链接：${subscriptionText}`,
     "────────────",
     "📊 <b>节点概况</b>",
     `节点总数：<b>${totalCount}</b>`,
@@ -1081,9 +1109,9 @@ export function renderResult(p, nodeLimit = 20) {
     protocolText,
     "────────────",
     "🌍 <b>地区分布</b>",
-    regionText || "🌐 未知",
+    regionText || "🌐未知0",
     "────────────",
-    `📋 <b>节点列表</b>　<code>${visibleNodes.length}/${totalCount}</code>`
+    `📋 <b>节点列表</b> <code>${visibleNodes.length}/${totalCount}</code>`
   ];
 
   if (nodeLines.length) {
