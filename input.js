@@ -3,12 +3,27 @@ const DEFAULT_MAX_BYTES = 1024 * 1024;
 const HARD_MAX_BYTES = 5 * 1024 * 1024;
 const REQUEST_TIMEOUT = 15000;
 const MAX_URL_LENGTH = 4096;
+const MAX_REDIRECTS = 5;
+
+const REDIRECT_STATUSES = new Set([
+  301,
+  302,
+  303,
+  307,
+  308
+]);
+
+const ALLOWED_FILE_EXTENSIONS = new Set([
+  "txt",
+  "yaml",
+  "yml"
+]);
 
 // ======================================
 // 输入大小限制
 // ======================================
 
-function getMaxBytes(env) {
+function getMaxBytes(env = {}) {
   const configured = Number(
     env.MAX_INPUT_BYTES || DEFAULT_MAX_BYTES
   );
@@ -63,7 +78,7 @@ async function fetchWithTimeout(
 // ======================================
 
 function isIpAddress(host) {
-  const value = host
+  const value = String(host || "")
     .toLowerCase()
     .replace(/^\[|\]$/g, "");
 
@@ -106,10 +121,12 @@ function validateSubscriptionUrl(input) {
     throw new Error("订阅 URL 格式不正确。");
   }
 
+  // 只允许 HTTPS
   if (url.protocol !== "https:") {
     throw new Error("仅允许 HTTPS 订阅地址。");
   }
 
+  // 禁止 URL 用户名和密码
   if (url.username || url.password) {
     throw new Error("URL 不允许包含用户名或密码。");
   }
@@ -118,6 +135,7 @@ function validateSubscriptionUrl(input) {
     .toLowerCase()
     .replace(/\.$/, "");
 
+  // 禁止 IP 和本地域名
   if (
     !host ||
     isIpAddress(host) ||
@@ -139,14 +157,14 @@ function validateSubscriptionUrl(input) {
     );
   }
 
-  // 必须使用正常域名格式
+  // 必须使用正常公网域名
   if (!host.includes(".")) {
     throw new Error(
       "订阅地址必须使用有效的公网域名。"
     );
   }
 
-  // 只允许默认 HTTPS 端口
+  // 只允许 HTTPS 默认端口
   if (url.port && url.port !== "443") {
     throw new Error(
       "订阅地址仅允许 HTTPS 默认端口 443。"
@@ -161,12 +179,14 @@ function validateSubscriptionUrl(input) {
 
 // ======================================
 // 读取并限制响应内容大小
+// 同时限制响应体读取时间
 // ======================================
 
 async function readLimitedText(
   response,
   maxBytes,
-  errorMessage
+  errorMessage,
+  timeout = REQUEST_TIMEOUT
 ) {
   const contentLength = response.headers.get(
     "content-length"
@@ -188,6 +208,8 @@ async function readLimitedText(
     }
 
     if (size > maxBytes) {
+      await response.body?.cancel().catch(() => {});
+
       throw new Error(errorMessage);
     }
   }
@@ -199,12 +221,26 @@ async function readLimitedText(
   }
 
   const reader = response.body.getReader();
+
   const chunks = [];
+
   let total = 0;
+  let timedOut = false;
+
+  const timer = setTimeout(() => {
+    timedOut = true;
+    reader.cancel().catch(() => {});
+  }, timeout);
 
   try {
     while (true) {
       const { done, value } = await reader.read();
+
+      if (timedOut) {
+        throw new Error(
+          "读取服务器响应超时，请稍后重试。"
+        );
+      }
 
       if (done) break;
 
@@ -219,10 +255,18 @@ async function readLimitedText(
       chunks.push(value);
     }
   } finally {
+    clearTimeout(timer);
     reader.releaseLock();
   }
 
+  if (timedOut) {
+    throw new Error(
+      "读取服务器响应超时，请稍后重试。"
+    );
+  }
+
   const result = new Uint8Array(total);
+
   let offset = 0;
 
   for (const chunk of chunks) {
@@ -299,46 +343,55 @@ async function tg(
 // ======================================
 
 function extractSubscriptionUrl(text) {
+  if (typeof text !== "string") {
+    return null;
+  }
+
   const matches = [
     ...text.matchAll(/https:\/\/[^\s<>"']+/gi)
   ];
 
+  // 必须只有一条 URL
   if (matches.length !== 1) {
     return null;
   }
 
-  let candidate = matches[0][0];
+  const original = matches[0][0];
 
-  // 去除常见的尾部标点
-  candidate = candidate.replace(
+  // 去除常见尾部标点
+  const candidate = original.replace(
     /[，。；;,.!！?？)）\]}]+$/g,
     ""
   );
 
-  const start = text.indexOf(matches[0][0]);
-
-  if (start < 0 || !candidate) {
+  if (!candidate) {
     return null;
   }
 
-  const end = start + matches[0][0].length;
+  const start = matches[0].index;
+
+  if (typeof start !== "number" || start < 0) {
+    return null;
+  }
+
+  const end = start + original.length;
 
   const remaining = (
     text.slice(0, start) +
     text.slice(end)
   ).trim();
 
-  // 如果同一条消息还包含节点链接，
-  // 则按普通文本交给解析器处理
+  // 同一条消息包含节点 URI 时，
+  // 不将其中的 URL 单独当成订阅地址
   if (
-    /(?:vless|vmess|ss|ssr|trojan|hysteria2?|hy2|anytls|tuic|socks5?|http):\/\//i.test(
+    /(?:vless|vmess|ss|ssr|trojan|hysteria2?|hy2|anytls|tuic|socks5?|http|wireguard):\/\//i.test(
       remaining
     )
   ) {
     return null;
   }
 
-  // 避免将大量普通文字误识别为订阅链接
+  // 避免普通长文本误识别
   if (remaining.length > 100) {
     return null;
   }
@@ -376,17 +429,7 @@ export async function extractMessageInput(
       );
     }
 
-    // 整条消息就是订阅 URL
-    const exactUrl = /^https:\/\/[^\s]+$/i.test(text)
-      ? text
-      : null;
-
-    // 支持简单说明文字加一条订阅 URL
-    const embeddedUrl = exactUrl
-      ? null
-      : extractSubscriptionUrl(text);
-
-    const url = exactUrl || embeddedUrl;
+    const url = extractSubscriptionUrl(text);
 
     if (url) {
       validateSubscriptionUrl(url);
@@ -452,7 +495,7 @@ export async function extractMessageInput(
 
     if (
       extension &&
-      !["txt", "yaml", "yml"].includes(extension)
+      !ALLOWED_FILE_EXTENSIONS.has(extension)
     ) {
       throw new Error(
         "文件格式不支持，请发送 TXT 或 YAML 文件。"
@@ -484,7 +527,10 @@ export async function extractMessageInput(
     if (
       meta.file_path.startsWith("/") ||
       pathParts.some(
-        part => !part || part === "." || part === ".."
+        part =>
+          !part ||
+          part === "." ||
+          part === ".."
       )
     ) {
       throw new Error(
@@ -515,16 +561,17 @@ export async function extractMessageInput(
       );
     }
 
-    if (
-      response.status >= 300 &&
-      response.status < 400
-    ) {
+    if (REDIRECT_STATUSES.has(response.status)) {
+      await response.body?.cancel().catch(() => {});
+
       throw new Error(
         "Telegram 文件下载发生重定向，已拒绝访问。"
       );
     }
 
     if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+
       throw new Error(
         `Telegram 文件下载失败：HTTP ${response.status}`
       );
@@ -555,6 +602,7 @@ export async function extractMessageInput(
 
 // ======================================
 // 下载订阅
+// 支持多级重定向和短链接
 // ======================================
 
 export async function fetchSubscription(
@@ -563,43 +611,136 @@ export async function fetchSubscription(
 ) {
   const MAX = getMaxBytes(env);
 
-  const url = validateSubscriptionUrl(input);
+  let currentUrl = validateSubscriptionUrl(input);
 
-  let response;
+  const visited = new Set();
 
-  try {
-    response = await fetchWithTimeout(
-      url.toString(),
-      {
-        method: "GET",
-        redirect: "manual",
-        headers: {
-          "user-agent": "SubscriptionParserBot/1.0",
-          "accept": "*/*"
-        }
-      }
-    );
-  } catch {
-    throw new Error(
-      "订阅下载失败或请求超时。"
-    );
-  }
+  let response = null;
 
-  // 禁止自动跟随重定向
-  if (
-    response.status >= 300 &&
-    response.status < 400
+  // 最多 5 次重定向，即最多 6 次请求
+  for (
+    let redirectCount = 0;
+    redirectCount <= MAX_REDIRECTS;
+    redirectCount++
   ) {
+    const current = currentUrl.toString();
+
+    // 防止循环跳转
+    if (visited.has(current)) {
+      throw new Error(
+        "订阅链接发生循环重定向，无法继续访问。"
+      );
+    }
+
+    visited.add(current);
+
+    try {
+      response = await fetchWithTimeout(
+        current,
+        {
+          method: "GET",
+          redirect: "manual",
+          headers: {
+            "user-agent": "SubscriptionParserBot/1.0",
+            "accept": [
+              "text/plain",
+              "application/yaml",
+              "application/json",
+              "application/octet-stream",
+              "*/*"
+            ].join(", ")
+          }
+        }
+      );
+    } catch (error) {
+      if (
+        error?.message ===
+        "请求超时，请稍后重试。"
+      ) {
+        throw error;
+      }
+
+      throw new Error(
+        "订阅下载失败，请检查订阅地址或稍后重试。"
+      );
+    }
+
+    // ==================================
+    // 处理重定向
+    // ==================================
+
+    if (REDIRECT_STATUSES.has(response.status)) {
+      const location = response.headers.get(
+        "location"
+      );
+
+      await response.body?.cancel().catch(() => {});
+
+      if (!location || !location.trim()) {
+        throw new Error(
+          "订阅服务器要求重定向，但没有提供目标地址。"
+        );
+      }
+
+      if (redirectCount >= MAX_REDIRECTS) {
+        throw new Error(
+          `订阅链接重定向次数超过限制（${MAX_REDIRECTS} 次）。`
+        );
+      }
+
+      let nextUrl;
+
+      try {
+        // 支持：
+        // https://example.com/next
+        // /next
+        // ../next
+        // ?token=123
+        // //example.com/next
+
+        nextUrl = new URL(
+          location.trim(),
+          currentUrl
+        );
+      } catch {
+        throw new Error(
+          "订阅服务器返回了无效的重定向地址。"
+        );
+      }
+
+      // 每次跳转都重新检查 HTTPS 和域名
+      currentUrl = validateSubscriptionUrl(
+        nextUrl.toString()
+      );
+
+      continue;
+    }
+
+    // ==================================
+    // 处理异常状态
+    // ==================================
+
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+
+      throw new Error(
+        `订阅服务器返回 HTTP ${response.status}。`
+      );
+    }
+
+    // 非重定向，获取最终响应
+    break;
+  }
+
+  if (!response || !response.ok) {
     throw new Error(
-      "订阅服务器发生重定向，请使用最终 HTTPS 地址。"
+      "无法获取最终订阅内容。"
     );
   }
 
-  if (!response.ok) {
-    throw new Error(
-      `订阅服务器返回 HTTP ${response.status}。`
-    );
-  }
+  // ==================================
+  // 读取最终订阅内容
+  // ==================================
 
   const text = await readLimitedText(
     response,
@@ -613,8 +754,13 @@ export async function fetchSubscription(
     );
   }
 
+  // ==================================
+  // 返回内容和最终响应头
+  // ==================================
+
   return {
     text,
+
     headers: {
       userinfo: response.headers.get(
         "subscription-userinfo"
