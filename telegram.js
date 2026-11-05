@@ -232,6 +232,99 @@ function isOwnerAuthorized(userId) {
 }
 
 // ======================================
+// 判断消息是否属于订阅解析输入
+//
+// 普通聊天直接忽略
+// 支持 URL、节点 URI、Base64、YAML、文件
+// ======================================
+
+function isSubscriptionCandidate(message) {
+  // 文件类型检查
+  if (message.document) {
+    const name = String(
+      message.document.file_name || ""
+    ).toLowerCase();
+
+    const mime = String(
+      message.document.mime_type || ""
+    ).toLowerCase();
+
+    return (
+      /\.(txt|yaml|yml|conf)$/i.test(name) ||
+      mime === "text/plain" ||
+      mime.includes("yaml")
+    );
+  }
+
+  const text = String(
+    message.text || message.caption || ""
+  ).trim();
+
+  if (!text) {
+    return false;
+  }
+
+  // HTTP / HTTPS 订阅链接
+  if (/https?:\/\/\S+/i.test(text)) {
+    return true;
+  }
+
+  // 节点 URI
+  if (
+    /(?:^|\s)(?:vless|vmess|ss|trojan|hysteria|hysteria2|hy2|anytls|tuic|http|socks5?):\/\//i.test(text)
+  ) {
+    return true;
+  }
+
+  // Clash / Mihomo YAML
+  if (
+    /^\s*(?:proxies|mixed-port|port|proxy-groups)\s*:/m.test(text)
+  ) {
+    return true;
+  }
+
+  // Base64 订阅
+  const compact = text.replace(/\s/g, "");
+
+  if (
+    compact.length >= 24 &&
+    /^[A-Za-z0-9+/_=-]+$/.test(compact)
+  ) {
+    try {
+      let normalized = compact
+        .replace(/-/g, "+")
+        .replace(/_/g, "/")
+        .replace(/=+$/, "");
+
+      normalized = normalized.padEnd(
+        Math.ceil(normalized.length / 4) * 4,
+        "="
+      );
+
+      const binary = atob(normalized);
+
+      const bytes = Uint8Array.from(
+        binary,
+        c => c.charCodeAt(0)
+      );
+
+      const decoded = new TextDecoder("utf-8", {
+        fatal: true
+      }).decode(bytes);
+
+      return (
+        /(?:vless|vmess|ss|trojan|hysteria2?|hy2|anytls|tuic|http|socks5?):\/\//i.test(decoded) ||
+        /^\s*(?:proxies|mixed-port|port|proxy-groups)\s*:/m.test(decoded)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
+}
+
+// ======================================
 // 消息发送
 // ======================================
 
@@ -386,7 +479,10 @@ async function loadAndParse(
     headers = result.headers || {};
   }
 
-  if (typeof source !== "string" || !source.trim()) {
+  if (
+    typeof source !== "string" ||
+    !source.trim()
+  ) {
     throw new Error("输入内容为空。");
   }
 
@@ -437,6 +533,11 @@ export async function handleTelegramUpdate(
 
   const chatId = message.chat.id;
   const chatType = message.chat.type;
+
+  // 普通聊天、无关消息直接忽略
+  if (!isSubscriptionCandidate(message)) {
+    return;
+  }
 
   try {
     // 群组必须验证 Bot 自身管理员身份
@@ -772,13 +873,7 @@ async function handleCallback(
   const userId = query.from.id;
 
   try {
-    // ==================================
-    // 专属授权检查
-    //
-    // short 和 save 仅允许 OWNER_IDS
-    // 不受群组管理员身份影响
-    // ==================================
-
+    // short 和 save 仅允许授权名单用户
     if (
       OWNER_ONLY_ACTIONS.has(action) &&
       !isOwnerAuthorized(userId)
@@ -793,10 +888,7 @@ async function handleCallback(
       return;
     }
 
-    // ==================================
     // 群组权限检查
-    // ==================================
-
     if (chatType !== "private") {
       let botAdmin = false;
 
@@ -832,8 +924,8 @@ async function handleCallback(
         return;
       }
 
-      // 短链和保存功能的授权用户不需要群管理员身份
-      // 其他四个功能仍然要求群组管理员
+      // short 和 save 的授权用户不需要群管理员身份
+      // 其他四个功能仍然要求群管理员
       if (!OWNER_ONLY_ACTIONS.has(action)) {
         let userAdmin = false;
 
@@ -863,10 +955,7 @@ async function handleCallback(
       }
     }
 
-    // ==================================
     // 读取解析缓存
-    // ==================================
-
     if (!env.BOT_KV) {
       throw new Error("BOT_KV 未配置。");
     }
@@ -883,10 +972,7 @@ async function handleCallback(
 
     const data = JSON.parse(saved);
 
-    // ==================================
     // 展开 / 折叠
-    // ==================================
-
     if (action === "toggle") {
       if (
         state !== "0" &&
@@ -908,10 +994,7 @@ async function handleCallback(
       return;
     }
 
-    // ==================================
     // 生成操作指纹
-    // ==================================
-
     const fingerprint = await sha256(
       data.sourceUrl || data.raw
     );
@@ -919,10 +1002,7 @@ async function handleCallback(
     const usageKey =
       `${userId}:${fingerprint}`;
 
-    // ==================================
     // 原子领取额度
-    // ==================================
-
     const claim = await claimUsage(
       env,
       usageKey,
@@ -952,10 +1032,7 @@ async function handleCallback(
     try {
       let message = null;
 
-      // ==================================
       // 刷新订阅
-      // ==================================
-
       if (action === "refresh") {
         if (!data.sourceUrl) {
           throw new Error(
@@ -1004,10 +1081,7 @@ async function handleCallback(
         );
       }
 
-      // ==================================
       // 导出 Base64
-      // ==================================
-
       else if (action === "base64") {
         const full = parseFullContent(data);
 
@@ -1016,10 +1090,7 @@ async function handleCallback(
         );
       }
 
-      // ==================================
       // 导出 YAML
-      // ==================================
-
       else if (action === "yaml") {
         const full = parseFullContent(data);
 
@@ -1028,10 +1099,7 @@ async function handleCallback(
         );
       }
 
-      // ==================================
       // 生成公开短链
-      // ==================================
-
       else if (action === "short") {
         if (!data.sourceUrl) {
           throw new Error(
@@ -1051,10 +1119,7 @@ async function handleCallback(
           `短链：${escapeHtml(short)}`;
       }
 
-      // ==================================
       // 保存订阅
-      // ==================================
-
       else if (action === "save") {
         await saveSubscription(
           env,
@@ -1068,10 +1133,7 @@ async function handleCallback(
           "订阅已保存到你的个人记录。";
       }
 
-      // ==================================
       // 发送结果
-      // ==================================
-
       if (
         message !== null &&
         message !== ""
@@ -1086,10 +1148,7 @@ async function handleCallback(
         committed = true;
       }
 
-      // ==================================
       // 确认额度
-      // ==================================
-
       const usageCommitted = await commitUsage(
         env,
         usageKey,
