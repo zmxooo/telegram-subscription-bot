@@ -16,6 +16,24 @@ const PROTOCOL_ALIASES = {
   socks: "socks5"
 };
 
+const PROTOCOL_LABELS = {
+  vless: "VLESS",
+  vmess: "VMess",
+  ss: "SS",
+  trojan: "Trojan",
+  hysteria: "Hysteria",
+  hysteria2: "Hysteria2",
+  anytls: "AnyTLS",
+  tuic: "TUIC",
+  http: "HTTP",
+  socks5: "SOCKS5"
+};
+
+function protocolLabel(type) {
+  const key = String(type || "").toLowerCase();
+  return PROTOCOL_LABELS[key] || String(type || "未知");
+}
+
 // ======================================
 // 主解析入口
 // 默认最多缓存 1000 个节点
@@ -83,7 +101,6 @@ export function parseInput(input, maxNodes = 1000) {
 
   // ======================================
   // 限制缓存数量
-  // Infinity / MAX_SAFE_INTEGER 表示不截断
   // ======================================
 
   let limit = Number(maxNodes);
@@ -124,7 +141,6 @@ function stableValue(value) {
 
     for (const key of Object.keys(value).sort()) {
       if (key === "name") continue;
-
       result[key] = stableValue(value[key]);
     }
 
@@ -136,8 +152,6 @@ function stableValue(value) {
 
 // ======================================
 // 重复节点指纹
-// YAML 节点：根据完整配置生成指纹
-// URI 节点：忽略备注名称
 // ======================================
 
 function getFingerprint(n) {
@@ -150,7 +164,6 @@ function getFingerprint(n) {
       if (n.type === "vmess") {
         const data = n.vmessData || {};
         const normalized = { ...data };
-
         delete normalized.ps;
 
         return "vmess|" + JSON.stringify(stableValue(normalized));
@@ -165,7 +178,6 @@ function getFingerprint(n) {
       const params = [...u.searchParams.entries()]
         .sort((a, b) => {
           const keyCompare = a[0].localeCompare(b[0]);
-
           return keyCompare || a[1].localeCompare(b[1]);
         });
 
@@ -198,7 +210,6 @@ function getFingerprint(n) {
 
 function isSupportedUri(uri) {
   const match = String(uri).match(/^([a-z0-9]+):\/\//i);
-
   return !!match && SUPPORTED.has(match[1].toLowerCase());
 }
 
@@ -231,7 +242,6 @@ function decodeBase64(text) {
 
   try {
     let normalized = clean.replace(/-/g, "+").replace(/_/g, "/");
-
     normalized = normalized.replace(/=+$/, "");
 
     normalized = normalized.padEnd(
@@ -258,7 +268,6 @@ function decodeBase64(text) {
 
 function encodeBase64(text) {
   const bytes = new TextEncoder().encode(text);
-
   let binary = "";
 
   for (const b of bytes) {
@@ -275,7 +284,6 @@ function encodeBase64(text) {
 function decodeVmess(uri) {
   try {
     const raw = uri.slice("vmess://".length).split("#")[0];
-
     const decoded = decodeBase64(raw);
 
     if (!decoded) return null;
@@ -309,13 +317,11 @@ function decodeVmess(uri) {
 function parseUri(uri) {
   try {
     const match = uri.match(/^([a-z0-9]+):\/\//i);
-
     if (!match) return null;
 
     let type = match[1].toLowerCase();
 
     if (!SUPPORTED.has(type)) return null;
-
     if (type === "vmess") return decodeVmess(uri);
 
     type = PROTOCOL_ALIASES[type] || type;
@@ -325,7 +331,6 @@ function parseUri(uri) {
     }
 
     const u = new URL(uri);
-
     const server = u.hostname;
     const port = Number(u.port);
 
@@ -386,32 +391,27 @@ function safeDecode(value) {
 function parseLegacySS(uri) {
   try {
     const content = uri.slice(5).split("#")[0];
-
     const decoded = decodeBase64(content);
 
     if (!decoded || !decoded.includes("@")) return null;
 
     const at = decoded.lastIndexOf("@");
-
     const auth = decoded.slice(0, at);
     const address = decoded.slice(at + 1);
 
     const colon = auth.indexOf(":");
-
     if (colon < 0) return null;
 
     const cipher = auth.slice(0, colon);
     const password = auth.slice(colon + 1);
 
     const addressMatch = address.match(/^(.+):(\d+)$/);
-
     if (!addressMatch) return null;
 
     let name = addressMatch[1];
 
     try {
       const hash = uri.split("#")[1];
-
       if (hash) name = decodeURIComponent(hash);
     } catch {
       // 保留原始名称
@@ -444,7 +444,6 @@ function proxyToNode(p) {
   let type = String(p.type || "").toLowerCase();
 
   if (!SUPPORTED.has(type)) return null;
-
   type = PROTOCOL_ALIASES[type] || type;
 
   const server = String(p.server || "");
@@ -484,7 +483,6 @@ function proxyToNode(p) {
   };
 
   node.uri = buildNodeUri(node);
-
   return node;
 }
 
@@ -494,7 +492,6 @@ function proxyToNode(p) {
 
 function buildNodeUri(n) {
   const enc = value => encodeURIComponent(String(value ?? ""));
-
   const p = n.rawProxy || {};
 
   const server = n.server;
@@ -521,7 +518,6 @@ function buildNodeUri(n) {
   if (n.type === "ss") {
     const cipher = p.cipher || "aes-128-gcm";
     const password = p.password || "";
-
     const auth = encodeBase64(`${cipher}:${password}`);
 
     return `ss://${auth}@${server}:${port}#${name}`;
@@ -541,9 +537,7 @@ function buildNodeUri(n) {
   }
 
   const scheme = n.type === "hysteria2" ? "hysteria2" : n.type;
-
   const user = p.uuid || p.password || p.auth || n.identity || "";
-
   const auth = user ? `${enc(user)}@` : "";
 
   const q = new URLSearchParams();
@@ -772,9 +766,7 @@ const REGION_BY_NAME = new Map();
 
 for (const line of REGION_DATA.trim().split("\n")) {
   const [name, code, aliasText = ""] = line.split("|");
-
   const aliases = [name, ...aliasText.split(",")].filter(Boolean);
-
   const item = { name, code, aliases };
 
   REGION_MAP.push(item);
@@ -870,7 +862,6 @@ function getAirportName(sourceUrl) {
 
   try {
     const u = new URL(sourceUrl);
-
     const parts = u.pathname.split("/").filter(Boolean);
 
     if (parts.length) {
@@ -894,7 +885,6 @@ function parseUserinfo(value) {
 
   for (const part of String(value).split(";")) {
     const index = part.indexOf("=");
-
     if (index < 0) continue;
 
     const key = part.slice(0, index).trim().toLowerCase();
@@ -938,7 +928,6 @@ function fmt(n) {
   if (!Number.isFinite(n) || n <= 0) return "0 B";
 
   const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-
   let i = 0;
 
   while (n >= 1024 && i < units.length - 1) {
@@ -951,10 +940,8 @@ function fmt(n) {
 
 // ======================================
 // 解析结果展示
-//
 // renderResult(p, 20) = 展开
 // renderResult(p, 2)  = 折叠
-//
 // Telegram HTML 排版
 // ======================================
 
@@ -965,10 +952,6 @@ export function renderResult(p, nodeLimit = 20) {
     0,
     Math.floor(Number(nodeLimit) || 20)
   );
-
-  // ======================================
-  // 统计数据
-  // ======================================
 
   const protocols = p.protocolCounts || {};
   const regions = p.regionCounts || {};
@@ -1004,29 +987,18 @@ export function renderResult(p, nodeLimit = 20) {
   const truncatedCount =
     p.truncatedCount ?? Math.max(0, parsedCount - nodes.length);
 
-  // ======================================
   // 流量信息
-  // ======================================
-
   const info = parseUserinfo(
     p.headers?.userinfo ||
     p.headers?.["subscription-userinfo"] ||
     p.headers?.["Subscription-Userinfo"]
   );
 
-  // ======================================
   // 地区统计
-  // ======================================
-
   const regionEntries = Object.entries(regions)
     .sort((a, b) => b[1] - a[1]);
 
-  const regionNames = regionEntries
-    .filter(([name]) => name !== "未知")
-    .map(([name]) => name);
-
-  const regionTotal =
-    regionNames.length + (regions["未知"] ? 1 : 0);
+  const regionTotal = regionEntries.length;
 
   const regionText = regionEntries
     .map(([name, count]) => {
@@ -1034,23 +1006,16 @@ export function renderResult(p, nodeLimit = 20) {
     })
     .join("　");
 
-  // ======================================
-  // 协议类型
-  // 只显示类型，不显示协议数量分布
-  // ======================================
+  // 协议类型：去重显示，不显示数量
+  const protocolNames = [...new Set(
+    Object.keys(protocols).map(protocolLabel)
+  )];
 
-  const protocolEntries = Object.entries(protocols)
-    .sort((a, b) => b[1] - a[1]);
+  const protocolText = protocolNames.length
+    ? protocolNames.map(escapeHtml).join("、")
+    : "未知";
 
-  const protocolNames = protocolEntries
-    .map(([name]) => escapeHtml(name.toUpperCase()))
-    .join("、");
-
-  // ======================================
   // 订阅链接
-  // 只允许 HTTP / HTTPS 链接
-  // ======================================
-
   let subscriptionText = "未提供";
 
   if (p.sourceUrl) {
@@ -1068,18 +1033,12 @@ export function renderResult(p, nodeLimit = 20) {
     }
   }
 
-  // ======================================
   // 机场名称
-  // ======================================
-
   const airportName = escapeHtml(
     getAirportName(p.sourceUrl)
   );
 
-  // ======================================
   // 节点显示
-  // ======================================
-
   const visibleNodes = nodes.slice(0, limit);
 
   const hiddenCachedCount = Math.max(
@@ -1092,15 +1051,12 @@ export function renderResult(p, nodeLimit = 20) {
 
     return (
       `${index + 1}. ${flag(r)} ` +
-      `<code>${escapeHtml(n.type.toUpperCase())}</code> ` +
+      `<code>${escapeHtml(protocolLabel(n.type))}</code> ` +
       `${escapeHtml(n.name)}`
     );
   });
 
-  // ======================================
   // 组装消息
-  // ======================================
-
   const lines = [
     "📡 <b>订阅解析报告</b>",
     "<i>SUBSCRIPTION ANALYSIS</i>",
@@ -1109,6 +1065,12 @@ export function renderResult(p, nodeLimit = 20) {
     `机场名称：<b>${airportName}</b>`,
     `订阅链接：${subscriptionText}`,
     "────────────",
+    "💳 <b>流量信息</b>",
+    `总流量：<b>${info?.total || "未知"}</b>`,
+    `已用流量：<b>${info?.used || "未知"}</b>`,
+    `剩余流量：<b>${info?.remaining || "未知"}</b>`,
+    `到期时间：<b>${info?.expire || "未知"}</b>`,
+    "────────────",
     "📊 <b>节点概况</b>",
     `节点总数：<b>${totalCount}</b>`,
     `唯一节点：<b>${uniqueCount}</b>`,
@@ -1116,26 +1078,13 @@ export function renderResult(p, nodeLimit = 20) {
     `地区数量：<b>${regionTotal}</b>`,
     "────────────",
     "🔌 <b>协议类型</b>",
-    protocolNames || "未知",
+    protocolText,
     "────────────",
     "🌍 <b>地区分布</b>",
     regionText || "🌐 未知",
     "────────────",
-    "💳 <b>流量信息</b>"
-  ];
-
-  // ======================================
-  // 流量信息：只显示四项
-  // ======================================
-
-  lines.push(
-    `总流量：<b>${info?.total || "未知"}</b>`,
-    `已用流量：<b>${info?.used || "未知"}</b>`,
-    `剩余流量：<b>${info?.remaining || "未知"}</b>`,
-    `到期时间：<b>${info?.expire || "未知"}</b>`,
-    "────────────",
     `📋 <b>节点列表</b>　<code>${visibleNodes.length}/${totalCount}</code>`
-  );
+  ];
 
   if (nodeLines.length) {
     lines.push(...nodeLines);
@@ -1225,7 +1174,6 @@ function nodeToClash(n) {
 
   if (n.type === "http" || n.type === "socks5") {
     if (identity) p.username = identity;
-
     if (n.password) p.password = n.password;
   }
 
@@ -1243,7 +1191,6 @@ function nodeToClash(n) {
 
 export function exportYaml(nodes) {
   const proxies = (nodes || []).map(nodeToClash);
-
   const proxyNames = proxies.map(x => x.name);
 
   return YAML.stringify({
@@ -1251,9 +1198,7 @@ export function exportYaml(nodes) {
     "allow-lan": false,
     mode: "rule",
     "log-level": "warning",
-
     proxies,
-
     "proxy-groups": [
       {
         name: "节点选择",
@@ -1261,7 +1206,6 @@ export function exportYaml(nodes) {
         proxies: proxyNames
       }
     ],
-
     rules: [
       "MATCH,节点选择"
     ]
