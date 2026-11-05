@@ -1,3 +1,4 @@
+
 import YAML from "yaml";
 
 // ======================================
@@ -967,6 +968,8 @@ function fmt(n) {
 //
 // renderResult(p, 20) = 展开
 // renderResult(p, 2)  = 折叠
+//
+// Telegram HTML 排版
 // ======================================
 
 export function renderResult(p, nodeLimit = 20) {
@@ -977,7 +980,10 @@ export function renderResult(p, nodeLimit = 20) {
     Math.floor(Number(nodeLimit) || 20)
   );
 
-  // 优先使用全量统计结果
+  // ======================================
+  // 统计数据
+  // ======================================
+
   const protocols = p.protocolCounts || {};
   const regions = p.regionCounts || {};
 
@@ -990,7 +996,6 @@ export function renderResult(p, nodeLimit = 20) {
 
       if (!p.regionCounts) {
         const r = region(n.name);
-
         regions[r] = (regions[r] || 0) + 1;
       }
     }
@@ -1013,22 +1018,86 @@ export function renderResult(p, nodeLimit = 20) {
   const truncatedCount =
     p.truncatedCount ?? Math.max(0, parsedCount - nodes.length);
 
+  // ======================================
+  // 流量信息
+  // ======================================
+
   const info = parseUserinfo(
     p.headers?.userinfo ||
     p.headers?.["subscription-userinfo"] ||
     p.headers?.["Subscription-Userinfo"]
   );
 
-  const regionNames = Object.keys(regions).filter(
-    x => x !== "未知"
+  // ======================================
+  // 地区统计
+  // ======================================
+
+  const regionEntries = Object.entries(regions)
+    .sort((a, b) => b[1] - a[1]);
+
+  const regionNames = regionEntries
+    .filter(([name]) => name !== "未知")
+    .map(([name]) => name);
+
+  const regionTotal =
+    regionNames.length + (regions["未知"] ? 1 : 0);
+
+  const regionText = regionEntries
+    .map(([name, count]) => {
+      return `${flag(name)} ${escapeHtml(name)} <b>${count}</b>`;
+    })
+    .join("　");
+
+  // ======================================
+  // 协议统计
+  // ======================================
+
+  const protocolEntries = Object.entries(protocols)
+    .sort((a, b) => b[1] - a[1]);
+
+  const protocolText = protocolEntries
+    .map(([name, count]) => {
+      return `<code>${escapeHtml(name.toUpperCase())}</code> ${count}`;
+    })
+    .join("　");
+
+  const protocolNames = protocolEntries
+    .map(([name]) => escapeHtml(name.toUpperCase()))
+    .join("、");
+
+  // ======================================
+  // 订阅链接
+  // 只允许 HTTP / HTTPS 链接
+  // ======================================
+
+  let subscriptionText = "未提供";
+
+  if (p.sourceUrl) {
+    try {
+      const url = new URL(p.sourceUrl);
+
+      if (url.protocol === "http:" || url.protocol === "https:") {
+        subscriptionText =
+          `<a href="${escapeHtml(url.href)}">点击查看原始订阅链接</a>`;
+      } else {
+        subscriptionText = escapeHtml(p.sourceUrl);
+      }
+    } catch {
+      subscriptionText = escapeHtml(p.sourceUrl);
+    }
+  }
+
+  // ======================================
+  // 机场名称
+  // ======================================
+
+  const airportName = escapeHtml(
+    getAirportName(p.sourceUrl)
   );
 
-  const regionRange = [
-    ...regionNames.map(r => `${flag(r)}${r}`),
-    ...(regions["未知"] ? ["🌐未知"] : [])
-  ].join(",");
-
-  const airportName = getAirportName(p.sourceUrl);
+  // ======================================
+  // 节点显示
+  // ======================================
 
   const visibleNodes = nodes.slice(0, limit);
 
@@ -1037,61 +1106,98 @@ export function renderResult(p, nodeLimit = 20) {
     nodes.length - visibleNodes.length
   );
 
-  const lines = [
-    `📋 机场名称: ${escapeHtml(airportName)}`,
-
-    p.sourceUrl
-      ? `🔗 订阅链接: ${escapeHtml(p.sourceUrl)}`
-      : "🔗 订阅链接: 无",
-
-    `📊 流量详情: ${
-      info
-        ? `已用 ${info.used} / 总量 ${info.total} / 剩余 ${info.remaining}`
-        : "未知"
-    }`,
-
-    `🗓️ 过期时间: ${info?.expire || "未知"}`,
-
-    "",
-
-    `协议类型: ${Object.keys(protocols).join(",") || "未知"}`,
-
-    `节点总数: ${totalCount} | 国家/地区数: ${
-      regionNames.length + (regions["未知"] ? 1 : 0)
-    }`,
-
-    `重复节点: ${duplicateCount} | 实际唯一节点: ${uniqueCount}`,
-
-    `协议统计: ${
-      Object.entries(protocols)
-        .map(([k, v]) => `${k}: ${v}`)
-        .join(" | ") || "未知"
-    }`,
-
-    `节点范围: ${escapeHtml(regionRange || "🌐未知")}`,
-
-    "",
-
-    `节点列表 (共 ${totalCount} 个)`
-  ];
-
-  for (const n of visibleNodes) {
+  const nodeLines = visibleNodes.map((n, index) => {
     const r = region(n.name);
 
+    return (
+      `${index + 1}. ${flag(r)} ` +
+      `<code>${escapeHtml(n.type.toUpperCase())}</code> ` +
+      `${escapeHtml(n.name)}`
+    );
+  });
+
+  // ======================================
+  // 组装消息
+  // ======================================
+
+  const lines = [
+    "📡 <b>订阅解析报告</b>",
+    "<i>SUBSCRIPTION ANALYSIS</i>",
+    "",
+    "━━━━━━━━━━━━━━━━━━",
+    "📦 <b>订阅信息</b>",
+    `机场名称：<b>${airportName}</b>`,
+    `订阅链接：${subscriptionText}`,
+    "",
+    "━━━━━━━━━━━━━━━━━━",
+    "📊 <b>节点概况</b>",
+    `节点总数：<b>${totalCount}</b>`,
+    `唯一节点：<b>${uniqueCount}</b>`,
+    `重复节点：<b>${duplicateCount}</b>`,
+    `地区数量：<b>${regionTotal}</b>`,
+    "",
+    "━━━━━━━━━━━━━━━━━━",
+    "🔌 <b>协议分布</b>",
+    protocolText || "暂无协议统计",
+    "",
+    `协议类型：${protocolNames || "未知"}`,
+    "",
+    "━━━━━━━━━━━━━━━━━━",
+    "🌍 <b>地区分布</b>",
+    regionText || "🌐 未知",
+    "",
+    "━━━━━━━━━━━━━━━━━━",
+    "💳 <b>流量与有效期</b>"
+  ];
+
+  if (info) {
     lines.push(
-      `- ${flag(r)} ${escapeHtml(n.type)}: ${escapeHtml(n.name)}`
+      `总流量：<b>${info.total}</b>`,
+      `已用流量：<b>${info.used}</b>`,
+      `剩余流量：<b>${info.remaining}</b>`,
+      `上传流量：${info.upload}`,
+      `下载流量：${info.download}`,
+      `到期时间：<b>${info.expire}</b>`
+    );
+  } else {
+    lines.push(
+      "流量信息：未知",
+      "到期时间：未知"
     );
   }
 
+  lines.push(
+    "",
+    "━━━━━━━━━━━━━━━━━━",
+    `📋 <b>节点列表</b>　<code>${visibleNodes.length}/${totalCount}</code>`
+  );
+
+  if (nodeLines.length) {
+    lines.push(...nodeLines);
+  } else {
+    lines.push("暂无可显示节点");
+  }
+
   if (hiddenCachedCount > 0) {
-    lines.push(`... 还有 ${hiddenCachedCount} 个节点未显示`);
+    lines.push(
+      "",
+      `还有 <b>${hiddenCachedCount}</b> 个已缓存节点未显示`
+    );
   }
 
   if (truncatedCount > 0) {
     lines.push(
-      `⚠️ 另有 ${truncatedCount} 个节点未载入缓存，导出时需重新解析原始内容`
+      "",
+      `⚠️ 另有 <b>${truncatedCount}</b> 个节点未载入缓存`,
+      "导出完整内容时需要重新解析原始订阅"
     );
   }
+
+  lines.push(
+    "",
+    "━━━━━━━━━━━━━━━━━━",
+    "<i>解析完成 · 节点名称保留原始内容</i>"
+  );
 
   return lines.join("\n");
 }
