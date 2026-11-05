@@ -30,8 +30,7 @@ const MAX_FILE_SIZE = 5 * 1024 * 1024;
 
 // ======================================
 // 短链和保存订阅专属授权名单
-//
-// 添加新用户时，只需要在这里增加数字 ID
+// 添加新用户时，只需要增加数字 ID
 // 只影响 short 和 save 两个功能
 // ======================================
 
@@ -39,6 +38,10 @@ const OWNER_IDS = new Set([
   "8556869794",
   "8471743937"
 ]);
+
+// ======================================
+// 节点数量限制
+// ======================================
 
 function getMaxNodes(env) {
   const value = Number(env.MAX_NODES || 1000);
@@ -232,10 +235,142 @@ function isOwnerAuthorized(userId) {
 }
 
 // ======================================
+// 判断是否为 JSON 订阅配置
+// ======================================
+
+function isSubscriptionJSON(text) {
+  try {
+    const json = JSON.parse(text);
+
+    if (
+      !json ||
+      typeof json !== "object"
+    ) {
+      return false;
+    }
+
+    return (
+      Array.isArray(json.outbounds) ||
+      Array.isArray(json.proxies) ||
+      Array.isArray(json.endpoints) ||
+      Array.isArray(json["proxy-providers"])
+    );
+
+  } catch {
+    return false;
+  }
+}
+
+// ======================================
+// 判断是否为 Clash / Mihomo YAML
+// ======================================
+
+function isClashConfig(text) {
+  return /^\s*(?:proxies|proxy-groups|proxy-providers|mixed-port|socks-port|port|redir-port|tproxy-port)\s*:/mi.test(text);
+}
+
+// ======================================
+// 判断是否为 Surge / Loon 配置
+// ======================================
+
+function isSurgeConfig(text) {
+  const hasSection =
+    /^\s*\[(?:Proxy|Proxy Group|Proxy Group|Proxy Provider|Remote Proxy|General)\]\s*$/mi.test(text);
+
+  const hasProxy =
+    /^\s*[^#;\r\n][^\r\n]*=\s*(?:ss|ssr|vmess|vless|trojan|hysteria|http|socks|wireguard)\s*,/mi.test(text);
+
+  return hasSection && hasProxy;
+}
+
+// ======================================
+// 判断是否为 Quantumult X 配置
+// ======================================
+
+function isQuantumultConfig(text) {
+  return (
+    /^\s*\[(?:server_local|server_remote|filter_remote|policy)\]\s*$/mi.test(text) ||
+    /^\s*(?:vmess|vless|shadowsocks|trojan|hysteria2)\s*=/mi.test(text)
+  );
+}
+
+// ======================================
+// Base64 解码识别
+// 支持 URL-safe、缺少填充符、多层编码
+// ======================================
+
+function isBase64Subscription(text) {
+  let current = String(text || "")
+    .replace(/\s/g, "");
+
+  if (
+    current.length < 16 ||
+    !/^[A-Za-z0-9+/_=-]+$/.test(current)
+  ) {
+    return false;
+  }
+
+  for (let i = 0; i < 3; i++) {
+    try {
+      let normalized = current
+        .replace(/-/g, "+")
+        .replace(/_/g, "/")
+        .replace(/=+$/, "");
+
+      normalized += "=".repeat(
+        (4 - normalized.length % 4) % 4
+      );
+
+      const binary = atob(normalized);
+
+      const bytes = Uint8Array.from(
+        binary,
+        c => c.charCodeAt(0)
+      );
+
+      const decoded = new TextDecoder(
+        "utf-8",
+        { fatal: true }
+      ).decode(bytes);
+
+      if (
+        /\b(?:vless|vmess|ss|ssr|trojan|hysteria|hysteria2|hy2|anytls|tuic|http|socks5?|mieru|mierus|wireguard|wg):\/\//i.test(decoded)
+      ) {
+        return true;
+      }
+
+      if (
+        isClashConfig(decoded) ||
+        isSubscriptionJSON(decoded) ||
+        isSurgeConfig(decoded) ||
+        isQuantumultConfig(decoded)
+      ) {
+        return true;
+      }
+
+      current = decoded.replace(/\s/g, "");
+
+      if (
+        current.length < 16 ||
+        !/^[A-Za-z0-9+/_=-]+$/.test(current)
+      ) {
+        break;
+      }
+
+    } catch {
+      break;
+    }
+  }
+
+  return false;
+}
+
+// ======================================
 // 判断消息是否属于订阅解析输入
 //
 // 普通聊天直接忽略
-// 支持 URL、节点 URI、Base64、YAML、文件
+// 支持 URL、节点 URI、Base64、
+// YAML、JSON、Surge、Loon、Quantumult X、文件
 // ======================================
 
 function isSubscriptionCandidate(message) {
@@ -250,9 +385,11 @@ function isSubscriptionCandidate(message) {
     ).toLowerCase();
 
     return (
-      /\.(txt|yaml|yml|conf)$/i.test(name) ||
+      /\.(txt|yaml|yml|conf|json|ini|list|log)$/i.test(name) ||
       mime === "text/plain" ||
-      mime.includes("yaml")
+      mime.includes("yaml") ||
+      mime.includes("json") ||
+      mime === "application/octet-stream"
     );
   }
 
@@ -264,61 +401,41 @@ function isSubscriptionCandidate(message) {
     return false;
   }
 
-  // HTTP / HTTPS 订阅链接
+  // 1. HTTP / HTTPS 订阅链接
   if (/https?:\/\/\S+/i.test(text)) {
     return true;
   }
 
-  // 节点 URI
+  // 2. 常见节点 URI
   if (
-    /(?:^|\s)(?:vless|vmess|ss|trojan|hysteria|hysteria2|hy2|anytls|tuic|http|socks5?):\/\//i.test(text)
+    /\b(?:vless|vmess|ss|ssr|trojan|hysteria|hysteria2|hy2|anytls|tuic|http|socks|socks5|mieru|mierus|wireguard|wg):\/\//i.test(text)
   ) {
     return true;
   }
 
-  // Clash / Mihomo YAML
-  if (
-    /^\s*(?:proxies|mixed-port|port|proxy-groups)\s*:/m.test(text)
-  ) {
+  // 3. Clash / Mihomo YAML
+  if (isClashConfig(text)) {
     return true;
   }
 
-  // Base64 订阅
-  const compact = text.replace(/\s/g, "");
+  // 4. Sing-box JSON
+  if (isSubscriptionJSON(text)) {
+    return true;
+  }
 
-  if (
-    compact.length >= 24 &&
-    /^[A-Za-z0-9+/_=-]+$/.test(compact)
-  ) {
-    try {
-      let normalized = compact
-        .replace(/-/g, "+")
-        .replace(/_/g, "/")
-        .replace(/=+$/, "");
+  // 5. Surge / Loon
+  if (isSurgeConfig(text)) {
+    return true;
+  }
 
-      normalized = normalized.padEnd(
-        Math.ceil(normalized.length / 4) * 4,
-        "="
-      );
+  // 6. Quantumult X
+  if (isQuantumultConfig(text)) {
+    return true;
+  }
 
-      const binary = atob(normalized);
-
-      const bytes = Uint8Array.from(
-        binary,
-        c => c.charCodeAt(0)
-      );
-
-      const decoded = new TextDecoder("utf-8", {
-        fatal: true
-      }).decode(bytes);
-
-      return (
-        /(?:vless|vmess|ss|trojan|hysteria2?|hy2|anytls|tuic|http|socks5?):\/\//i.test(decoded) ||
-        /^\s*(?:proxies|mixed-port|port|proxy-groups)\s*:/m.test(decoded)
-      );
-    } catch {
-      return false;
-    }
+  // 7. Base64
+  if (isBase64Subscription(text)) {
+    return true;
   }
 
   return false;
@@ -575,7 +692,7 @@ export async function handleTelegramUpdate(
       await reply(
         env,
         chatId,
-        "没有识别到支持的节点。请发送订阅链接、节点 URI、TXT 或 Clash YAML。"
+        "没有识别到支持的节点。请发送订阅链接、节点 URI、Base64、TXT、Clash YAML 或其他受支持配置。"
       );
 
       return;
@@ -714,7 +831,7 @@ async function updateParsed(
 // 完整内容重新解析
 // ======================================
 
-function parseFullContent(data) {
+function parseFullContent(data, env) {
   if (
     typeof data.raw !== "string" ||
     !data.raw.trim()
@@ -726,7 +843,7 @@ function parseFullContent(data) {
 
   const parsed = parseInput(
     data.raw,
-    Number.MAX_SAFE_INTEGER
+    getMaxNodes(env)
   );
 
   if (
@@ -1032,7 +1149,10 @@ async function handleCallback(
     try {
       let message = null;
 
+      // ======================================
       // 刷新订阅
+      // ======================================
+
       if (action === "refresh") {
         if (!data.sourceUrl) {
           throw new Error(
@@ -1081,25 +1201,40 @@ async function handleCallback(
         );
       }
 
+      // ======================================
       // 导出 Base64
+      // ======================================
+
       else if (action === "base64") {
-        const full = parseFullContent(data);
+        const full = parseFullContent(
+          data,
+          env
+        );
 
         message = exportBase64(
           full.nodes
         );
       }
 
+      // ======================================
       // 导出 YAML
+      // ======================================
+
       else if (action === "yaml") {
-        const full = parseFullContent(data);
+        const full = parseFullContent(
+          data,
+          env
+        );
 
         message = exportYaml(
           full.nodes
         );
       }
 
+      // ======================================
       // 生成公开短链
+      // ======================================
+
       else if (action === "short") {
         if (!data.sourceUrl) {
           throw new Error(
@@ -1119,7 +1254,10 @@ async function handleCallback(
           `短链：${escapeHtml(short)}`;
       }
 
+      // ======================================
       // 保存订阅
+      // ======================================
+
       else if (action === "save") {
         await saveSubscription(
           env,
@@ -1133,7 +1271,10 @@ async function handleCallback(
           "订阅已保存到你的个人记录。";
       }
 
+      // ======================================
       // 发送结果
+      // ======================================
+
       if (
         message !== null &&
         message !== ""
@@ -1148,7 +1289,10 @@ async function handleCallback(
         committed = true;
       }
 
+      // ======================================
       // 确认额度
+      // ======================================
+
       const usageCommitted = await commitUsage(
         env,
         usageKey,
