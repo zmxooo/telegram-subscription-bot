@@ -136,10 +136,8 @@ function stableValue(value) {
 
 // ======================================
 // 重复节点指纹
-//
 // YAML 节点：根据完整配置生成指纹
 // URI 节点：忽略备注名称
-// 不改变 UUID、密码、参数值的大小写
 // ======================================
 
 function getFingerprint(n) {
@@ -160,14 +158,10 @@ function getFingerprint(n) {
 
       const u = new URL(n.uri);
 
-      // 忽略节点备注
       u.hash = "";
-
-      // 协议和主机名不区分大小写
       u.protocol = u.protocol.toLowerCase();
       u.hostname = u.hostname.toLowerCase();
 
-      // 参数排序，但不改变参数值大小写
       const params = [...u.searchParams.entries()]
         .sort((a, b) => {
           const keyCompare = a[0].localeCompare(b[0]);
@@ -183,7 +177,6 @@ function getFingerprint(n) {
 
       return u.toString();
     } catch {
-      // 解析失败时只去除备注
       return String(n.uri).split("#")[0];
     }
   }
@@ -443,7 +436,6 @@ function parseLegacySS(uri) {
 
 // ======================================
 // Clash YAML 转节点
-// 保留完整 rawProxy
 // ======================================
 
 function proxyToNode(p) {
@@ -473,7 +465,6 @@ function proxyToNode(p) {
 
   let password = "";
 
-  // HTTP / SOCKS5 分开保存用户名和密码
   if (type === "http" || type === "socks5") {
     identity = String(p.username || "");
     password = String(p.password || "");
@@ -572,7 +563,6 @@ function buildNodeUri(n) {
 
 // ======================================
 // 全球国家和地区名称 / ISO 代码
-// 格式：中文名称|ISO代码|别名1,别名2
 // ======================================
 
 const REGION_DATA = `
@@ -794,7 +784,6 @@ for (const line of REGION_DATA.trim().split("\n")) {
   }
 }
 
-// 优先匹配较长名称，避免短名称抢先匹配
 const REGION_MATCHERS = REGION_MAP
   .flatMap(item => item.aliases.map(alias => ({ alias, item })))
   .sort((a, b) => b.alias.length - a.alias.length);
@@ -802,7 +791,6 @@ const REGION_MATCHERS = REGION_MAP
 // ======================================
 // 地区识别
 // 只根据节点备注文字识别
-// 不使用 IP / GeoIP
 // ======================================
 
 function region(name) {
@@ -829,7 +817,6 @@ function region(name) {
     }
   }
 
-  // ISO 两位代码只接受独立词
   for (const item of REGION_MAP) {
     const re = new RegExp(
       `(^|[^a-z])${item.code.toLowerCase()}([^a-z]|$)`,
@@ -844,7 +831,6 @@ function region(name) {
 
 // ======================================
 // 国旗
-// 根据 ISO 两位代码自动生成
 // ======================================
 
 function flag(r) {
@@ -1049,17 +1035,12 @@ export function renderResult(p, nodeLimit = 20) {
     .join("　");
 
   // ======================================
-  // 协议统计
+  // 协议类型
+  // 只显示类型，不显示协议数量分布
   // ======================================
 
   const protocolEntries = Object.entries(protocols)
     .sort((a, b) => b[1] - a[1]);
-
-  const protocolText = protocolEntries
-    .map(([name, count]) => {
-      return `<code>${escapeHtml(name.toUpperCase())}</code> ${count}`;
-    })
-    .join("　");
 
   const protocolNames = protocolEntries
     .map(([name]) => escapeHtml(name.toUpperCase()))
@@ -1123,52 +1104,36 @@ export function renderResult(p, nodeLimit = 20) {
   const lines = [
     "📡 <b>订阅解析报告</b>",
     "<i>SUBSCRIPTION ANALYSIS</i>",
-    "",
-    "━━━━━━━━━━━━━━━━━━",
+    "────────────",
     "📦 <b>订阅信息</b>",
     `机场名称：<b>${airportName}</b>`,
     `订阅链接：${subscriptionText}`,
-    "",
-    "━━━━━━━━━━━━━━━━━━",
+    "────────────",
     "📊 <b>节点概况</b>",
     `节点总数：<b>${totalCount}</b>`,
     `唯一节点：<b>${uniqueCount}</b>`,
     `重复节点：<b>${duplicateCount}</b>`,
     `地区数量：<b>${regionTotal}</b>`,
-    "",
-    "━━━━━━━━━━━━━━━━━━",
-    "🔌 <b>协议分布</b>",
-    protocolText || "暂无协议统计",
-    "",
-    `协议类型：${protocolNames || "未知"}`,
-    "",
-    "━━━━━━━━━━━━━━━━━━",
+    "────────────",
+    "🔌 <b>协议类型</b>",
+    protocolNames || "未知",
+    "────────────",
     "🌍 <b>地区分布</b>",
     regionText || "🌐 未知",
-    "",
-    "━━━━━━━━━━━━━━━━━━",
-    "💳 <b>流量与有效期</b>"
+    "────────────",
+    "💳 <b>流量信息</b>"
   ];
 
-  if (info) {
-    lines.push(
-      `总流量：<b>${info.total}</b>`,
-      `已用流量：<b>${info.used}</b>`,
-      `剩余流量：<b>${info.remaining}</b>`,
-      `上传流量：${info.upload}`,
-      `下载流量：${info.download}`,
-      `到期时间：<b>${info.expire}</b>`
-    );
-  } else {
-    lines.push(
-      "流量信息：未知",
-      "到期时间：未知"
-    );
-  }
+  // ======================================
+  // 流量信息：只显示四项
+  // ======================================
 
   lines.push(
-    "",
-    "━━━━━━━━━━━━━━━━━━",
+    `总流量：<b>${info?.total || "未知"}</b>`,
+    `已用流量：<b>${info?.used || "未知"}</b>`,
+    `剩余流量：<b>${info?.remaining || "未知"}</b>`,
+    `到期时间：<b>${info?.expire || "未知"}</b>`,
+    "────────────",
     `📋 <b>节点列表</b>　<code>${visibleNodes.length}/${totalCount}</code>`
   );
 
@@ -1180,22 +1145,19 @@ export function renderResult(p, nodeLimit = 20) {
 
   if (hiddenCachedCount > 0) {
     lines.push(
-      "",
       `还有 <b>${hiddenCachedCount}</b> 个已缓存节点未显示`
     );
   }
 
   if (truncatedCount > 0) {
     lines.push(
-      "",
       `⚠️ 另有 <b>${truncatedCount}</b> 个节点未载入缓存`,
       "导出完整内容时需要重新解析原始订阅"
     );
   }
 
   lines.push(
-    "",
-    "━━━━━━━━━━━━━━━━━━",
+    "────────────",
     "<i>解析完成 · 节点名称保留原始内容</i>"
   );
 
@@ -1220,7 +1182,6 @@ export function exportBase64(nodes) {
 // ======================================
 
 function nodeToClash(n) {
-  // YAML 原始节点优先保留完整配置
   if (n.rawProxy) {
     return {
       ...n.rawProxy,
