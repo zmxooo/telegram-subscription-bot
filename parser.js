@@ -1,3 +1,4 @@
+
 import YAML from "yaml";
 
 // ======================================
@@ -5,102 +6,80 @@ import YAML from "yaml";
 // ======================================
 
 const SUPPORTED = new Set([
-  "vless", "vmess", "ss", "ssr", "trojan",
+  "vless", "vmess", "ss", "trojan",
   "hysteria", "hysteria2", "hy2",
-  "anytls", "tuic", "http", "https",
-  "socks", "socks5", "wireguard"
+  "anytls", "tuic", "http", "socks", "socks5"
 ]);
 
 const PROTOCOL_ALIASES = {
   hy2: "hysteria2",
-  socks: "socks5",
-  https: "http"
+  socks: "socks5"
 };
 
 const PROTOCOL_LABELS = {
   vless: "VLESS",
   vmess: "VMess",
   ss: "SS",
-  ssr: "SSR",
   trojan: "Trojan",
   hysteria: "Hysteria",
   hysteria2: "Hysteria2",
   anytls: "AnyTLS",
   tuic: "TUIC",
   http: "HTTP",
-  socks5: "SOCKS5",
-  wireguard: "WireGuard"
+  socks5: "SOCKS5"
 };
 
-const SINGBOX_TYPES = new Set([
-  "vless", "vmess", "shadowsocks", "shadowsocksr",
-  "trojan", "hysteria", "hysteria2", "tuic",
-  "anytls", "wireguard", "socks", "http"
-]);
-
-function normalizeType(type) {
-  const key = String(type || "").toLowerCase();
-  return PROTOCOL_ALIASES[key] || key;
-}
-
 function protocolLabel(type) {
-  const key = normalizeType(type);
+  const key = String(type || "").toLowerCase();
   return PROTOCOL_LABELS[key] || String(type || "未知");
 }
 
 // ======================================
 // 主解析入口
+// 重复节点不删除，只统计
 // ======================================
 
 export function parseInput(input, maxNodes = 1000) {
-  const originalText = String(input || "").trim();
+  let text = String(input || "").trim();
 
-  if (!originalText) {
-    return emptyResult();
+  if (!text) {
+    return {
+      nodes: [],
+      totalCount: 0,
+      parsedCount: 0,
+      truncatedCount: 0,
+      duplicateCount: 0,
+      uniqueCount: 0,
+      protocolCounts: {},
+      regionCounts: {}
+    };
   }
 
   let nodes = [];
-  let parsedText = originalText;
+  const yaml = tryYaml(text);
 
-  // 1. 直接解析结构化内容
-  nodes = parseStructured(parsedText);
+  if (yaml && Array.isArray(yaml.proxies)) {
+    nodes = yaml.proxies.map(proxyToNode).filter(Boolean);
+  } else {
+    const decoded = decodeBase64(text);
 
-  // 2. 尝试 Base64 和多层 Base64
-  if (!nodes.length) {
-    const decodedTexts = decodeBase64Layers(parsedText);
-
-    for (const decoded of decodedTexts) {
-      const found = parseStructured(decoded);
-
-      if (found.length) {
-        nodes = found;
-        parsedText = decoded;
-        break;
-      }
+    if (
+      decoded &&
+      /(?:vless|vmess|ss|trojan|hysteria2?|hy2|anytls|tuic|http|socks5?):\/\//i.test(decoded)
+    ) {
+      text = decoded;
     }
-  }
 
-  // 3. 解析明文 URI、客户端配置
-  if (!nodes.length) {
-    nodes = parseTextFormats(parsedText);
-  }
+    for (const line of text.split(/\r?\n/).map(x => x.trim()).filter(Boolean)) {
+      if (!isSupportedUri(line)) continue;
 
-  // 4. 如果仍未解析，尝试逐层解码后的文本
-  if (!nodes.length) {
-    const decodedTexts = decodeBase64Layers(originalText);
-
-    for (const decoded of decodedTexts) {
-      const found = parseTextFormats(decoded);
-
-      if (found.length) {
-        nodes = found;
-        break;
-      }
+      const node = parseUri(line);
+      if (node) nodes.push(node);
     }
   }
 
   // ======================================
-  // 全量统计
+  // 全量统计：必须在节点截断之前完成
   // ======================================
 
   const fingerprints = nodes.map(getFingerprint);
@@ -112,13 +91,10 @@ export function parseInput(input, maxNodes = 1000) {
   const regionCounts = {};
 
   for (const node of nodes) {
-    protocolCounts[node.type] =
-      (protocolCounts[node.type] || 0) + 1;
+    protocolCounts[node.type] = (protocolCounts[node.type] || 0) + 1;
 
     const r = region(node.name);
-
-    regionCounts[r] =
-      (regionCounts[r] || 0) + 1;
+    regionCounts[r] = (regionCounts[r] || 0) + 1;
   }
 
   // ======================================
@@ -141,221 +117,12 @@ export function parseInput(input, maxNodes = 1000) {
     nodes: limitedNodes,
     totalCount,
     parsedCount: totalCount,
-    truncatedCount: Math.max(
-      0,
-      totalCount - limitedNodes.length
-    ),
+    truncatedCount: Math.max(0, totalCount - limitedNodes.length),
     uniqueCount,
     duplicateCount,
     protocolCounts,
     regionCounts
   };
-}
-
-function emptyResult() {
-  return {
-    nodes: [],
-    totalCount: 0,
-    parsedCount: 0,
-    truncatedCount: 0,
-    duplicateCount: 0,
-    uniqueCount: 0,
-    protocolCounts: {},
-    regionCounts: {}
-  };
-}
-
-// ======================================
-// 统一结构化解析
-// ======================================
-
-function parseStructured(text) {
-  const value = String(text || "").trim();
-
-  if (!value) return [];
-
-  // JSON
-  const json = tryJson(value);
-
-  if (json) {
-    const singboxNodes = parseSingBox(json);
-
-    if (singboxNodes.length) {
-      return singboxNodes;
-    }
-
-    const genericNodes = parseGenericJson(json);
-
-    if (genericNodes.length) {
-      return genericNodes;
-    }
-  }
-
-  // YAML
-  const yaml = tryYaml(value);
-
-  if (yaml) {
-    const nodes = [];
-
-    if (Array.isArray(yaml.proxies)) {
-      for (const proxy of yaml.proxies) {
-        const node = proxyToNode(proxy);
-
-        if (node) nodes.push(node);
-      }
-    }
-
-    if (nodes.length) return nodes;
-
-    // 部分配置将节点放在 proxies 下的其他结构中
-    if (yaml.proxy && Array.isArray(yaml.proxy)) {
-      for (const proxy of yaml.proxy) {
-        const node = proxyToNode(proxy);
-
-        if (node) nodes.push(node);
-      }
-    }
-
-    if (nodes.length) return nodes;
-  }
-
-  return [];
-}
-
-// ======================================
-// JSON 解析
-// ======================================
-
-function tryJson(text) {
-  const value = String(text || "").trim();
-
-  if (!value.startsWith("{") && !value.startsWith("[")) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
-
-// ======================================
-// YAML 识别
-// ======================================
-
-function tryYaml(text) {
-  const value = String(text || "").trim();
-
-  if (!/^\s*(proxies|mixed-port|port|proxy-groups|proxy-providers|rules)\s*:/m.test(value)) {
-    return null;
-  }
-
-  try {
-    return YAML.parse(value);
-  } catch {
-    return null;
-  }
-}
-
-// ======================================
-// Base64 多层解码
-// ======================================
-
-function decodeBase64Layers(input, maxLayers = 3) {
-  const results = [];
-  let current = String(input || "").trim();
-
-  for (let i = 0; i < maxLayers; i++) {
-    const decoded = decodeBase64(current);
-
-    if (!decoded || decoded === current) break;
-
-    // 过滤明显不是文本的内容
-    if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(decoded)) {
-      break;
-    }
-
-    results.push(decoded);
-    current = decoded.trim();
-
-    if (
-      /(?:vless|vmess|ss|ssr|trojan|hysteria|hysteria2|hy2|anytls|tuic|socks5?|wireguard):\/\//i.test(current) ||
-      /^\s*(proxies|outbounds|mixed-port|port|proxy-groups)\s*:/m.test(current) ||
-      current.startsWith("{")
-    ) {
-      // 已经是可识别内容，仍保留结果
-      break;
-    }
-  }
-
-  return results;
-}
-
-// ======================================
-// Base64 UTF-8 解码
-// ======================================
-
-function decodeBase64(text) {
-  let clean = String(text || "").trim();
-
-  if (!clean || clean.length < 8) return null;
-
-  // 允许换行
-  clean = clean.replace(/\s/g, "");
-
-  if (!/^[A-Za-z0-9+/_=-]+$/.test(clean)) {
-    return null;
-  }
-
-  try {
-    let normalized = clean
-      .replace(/-/g, "+")
-      .replace(/_/g, "/")
-      .replace(/=+$/, "");
-
-    if (normalized.length % 4 === 1) {
-      return null;
-    }
-
-    normalized = normalized.padEnd(
-      Math.ceil(normalized.length / 4) * 4,
-      "="
-    );
-
-    const binary = atob(normalized);
-
-    const bytes = Uint8Array.from(
-      binary,
-      c => c.charCodeAt(0)
-    );
-
-    const decoded = new TextDecoder(
-      "utf-8",
-      { fatal: true }
-    ).decode(bytes);
-
-    if (!decoded.trim()) return null;
-
-    return decoded;
-  } catch {
-    return null;
-  }
-}
-
-// ======================================
-// Base64 UTF-8 编码
-// ======================================
-
-function encodeBase64(text) {
-  const bytes = new TextEncoder().encode(text);
-  let binary = "";
-
-  for (const b of bytes) {
-    binary += String.fromCharCode(b);
-  }
-
-  return btoa(binary);
 }
 
 // ======================================
@@ -371,14 +138,7 @@ function stableValue(value) {
     const result = {};
 
     for (const key of Object.keys(value).sort()) {
-      if (
-        key === "name" ||
-        key === "tag" ||
-        key === "remarks"
-      ) {
-        continue;
-      }
-
+      if (key === "name") continue;
       result[key] = stableValue(value[key]);
     }
 
@@ -394,21 +154,17 @@ function stableValue(value) {
 
 function getFingerprint(n) {
   if (n.rawProxy) {
-    return (
-      String(n.type || "") +
-      "|" +
-      JSON.stringify(stableValue(n.rawProxy))
-    );
+    return JSON.stringify(stableValue(n.rawProxy));
   }
 
   if (n.uri) {
     try {
       if (n.type === "vmess") {
-        const data = { ...(n.vmessData || {}) };
+        const data = n.vmessData || {};
+        const normalized = { ...data };
+        delete normalized.ps;
 
-        delete data.ps;
-
-        return "vmess|" + JSON.stringify(stableValue(data));
+        return "vmess|" + JSON.stringify(stableValue(normalized));
       }
 
       const u = new URL(n.uri);
@@ -420,7 +176,6 @@ function getFingerprint(n) {
       const params = [...u.searchParams.entries()]
         .sort((a, b) => {
           const keyCompare = a[0].localeCompare(b[0]);
-
           return keyCompare || a[1].localeCompare(b[1]);
         });
 
@@ -452,56 +207,72 @@ function getFingerprint(n) {
 // ======================================
 
 function isSupportedUri(uri) {
-  const match = String(uri || "").match(
-    /^([a-z0-9]+):\/\//i
-  );
-
+  const match = String(uri).match(/^([a-z0-9]+):\/\//i);
   return !!match && SUPPORTED.has(match[1].toLowerCase());
 }
 
 // ======================================
-// URI 文本解析入口
+// YAML 识别
 // ======================================
 
-function parseTextFormats(text) {
-  const value = String(text || "");
-  const nodes = [];
-
-  // 1. 逐行解析标准 URI
-  for (const line of value.split(/\r?\n/)) {
-    const clean = line.trim();
-
-    if (!clean) continue;
-
-    const uriMatch = clean.match(
-      /(?:vless|vmess|ss|ssr|trojan|hysteria|hysteria2|hy2|anytls|tuic|https?|socks5?|wireguard):\/\/[^\s"'<>]+/i
-    );
-
-    if (uriMatch) {
-      const uri = trimUriPunctuation(uriMatch[0]);
-      const node = parseUri(uri);
-
-      if (node) nodes.push(node);
-    }
+function tryYaml(text) {
+  if (!/^\s*(proxies|mixed-port|port|proxy-groups)\s*:/m.test(text)) {
+    return null;
   }
 
-  if (nodes.length) return nodes;
-
-  // 2. Surge / Loon / Quantumult X 常见配置
-  const clientNodes = parseClientConfig(value);
-
-  if (clientNodes.length) return clientNodes;
-
-  // 3. SSR 独立 Base64 内容
-  const ssrNodes = parseSsrText(value);
-
-  if (ssrNodes.length) return ssrNodes;
-
-  return [];
+  try {
+    return YAML.parse(text);
+  } catch {
+    return null;
+  }
 }
 
-function trimUriPunctuation(uri) {
-  return String(uri || "").replace(/[),，。；;]+$/g, "");
+// ======================================
+// Base64 UTF-8 解码
+// ======================================
+
+function decodeBase64(text) {
+  const clean = String(text).replace(/\s/g, "");
+
+  if (!/^[A-Za-z0-9+/_=-]+$/.test(clean) || clean.length < 12) {
+    return null;
+  }
+
+  try {
+    let normalized = clean.replace(/-/g, "+").replace(/_/g, "/");
+    normalized = normalized.replace(/=+$/, "");
+
+    normalized = normalized.padEnd(
+      Math.ceil(normalized.length / 4) * 4,
+      "="
+    );
+
+    const binary = atob(normalized);
+
+    const bytes = Uint8Array.from(
+      binary,
+      c => c.charCodeAt(0)
+    );
+
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+// ======================================
+// Base64 UTF-8 编码
+// ======================================
+
+function encodeBase64(text) {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+
+  for (const b of bytes) {
+    binary += String.fromCharCode(b);
+  }
+
+  return btoa(binary);
 }
 
 // ======================================
@@ -510,10 +281,7 @@ function trimUriPunctuation(uri) {
 
 function decodeVmess(uri) {
   try {
-    const raw = uri
-      .slice("vmess://".length)
-      .split("#")[0];
-
+    const raw = uri.slice("vmess://".length).split("#")[0];
     const decoded = decodeBase64(raw);
 
     if (!decoded) return null;
@@ -533,100 +301,11 @@ function decodeVmess(uri) {
       sni: String(j.sni || j.host || ""),
       uri,
       vmessData: j,
-      rawProxy: null,
-      sourceFormat: "uri"
+      rawProxy: null
     };
   } catch {
     return null;
   }
-}
-
-// ======================================
-// SSR 解码
-// ======================================
-
-function decodeSsr(uri) {
-  try {
-    const raw = String(uri).slice("ssr://".length);
-    const decoded = decodeBase64(raw);
-
-    if (!decoded) return null;
-
-    const main = decoded.split("/?")[0];
-
-    const match = main.match(
-      /^(.+):(\d+):([^:]+):([^:]+):([^:]+):(.+)$/
-    );
-
-    if (!match) return null;
-
-    const server = match[1];
-    const port = Number(match[2]);
-    const protocol = safeDecode(match[3]);
-    const method = safeDecode(match[4]);
-    const obfs = safeDecode(match[5]);
-    const password = decodeBase64(match[6]) || match[6];
-
-    if (!server || !port || port > 65535) return null;
-
-    const paramsPart = decoded.split("/?")[1] || "";
-    const params = new URLSearchParams(paramsPart);
-
-    const remarks = params.get("remarks");
-    const name = remarks
-      ? decodeBase64(remarks) || safeDecode(remarks)
-      : server;
-
-    const obfsParam = params.get("obfsparam");
-    const protocolParam = params.get("protoparam");
-
-    return {
-      type: "ssr",
-      server,
-      port,
-      name,
-      identity: `${method}:${password}`,
-      password,
-      security: method,
-      sni: "",
-      uri,
-      rawProxy: {
-        name,
-        type: "ssr",
-        server,
-        port,
-        cipher: method,
-        password,
-        protocol,
-        protocolparam: protocolParam
-          ? decodeBase64(protocolParam) || protocolParam
-          : "",
-        obfs,
-        obfsparam: obfsParam
-          ? decodeBase64(obfsParam) || obfsParam
-          : ""
-      },
-      sourceFormat: "uri"
-    };
-  } catch {
-    return null;
-  }
-}
-
-function parseSsrText(text) {
-  const nodes = [];
-
-  for (const line of String(text || "").split(/\r?\n/)) {
-    const match = line.trim().match(/ssr:\/\/[A-Za-z0-9+/_=-]+/i);
-
-    if (!match) continue;
-
-    const node = decodeSsr(match[0]);
-
-    if (node) nodes.push(node);
-  }
-
-  return nodes;
 }
 
 // ======================================
@@ -635,37 +314,21 @@ function parseSsrText(text) {
 
 function parseUri(uri) {
   try {
-    const match = String(uri).match(
-      /^([a-z0-9]+):\/\//i
-    );
-
+    const match = uri.match(/^([a-z0-9]+):\/\//i);
     if (!match) return null;
 
     let type = match[1].toLowerCase();
 
     if (!SUPPORTED.has(type)) return null;
+    if (type === "vmess") return decodeVmess(uri);
 
-    if (type === "vmess") {
-      return decodeVmess(uri);
-    }
-
-    if (type === "ssr") {
-      return decodeSsr(uri);
-    }
-
-    type = normalizeType(type);
+    type = PROTOCOL_ALIASES[type] || type;
 
     if (type === "ss" && !uri.includes("@")) {
       return parseLegacySS(uri);
     }
 
-    // SS SIP002
-    if (type === "ss") {
-      return parseSsSip002(uri);
-    }
-
     const u = new URL(uri);
-
     const server = u.hostname;
     const port = Number(u.port);
 
@@ -686,10 +349,6 @@ function parseUri(uri) {
     const identity = safeDecode(u.username || "");
     const password = safeDecode(u.password || "");
 
-    const query = Object.fromEntries(
-      u.searchParams.entries()
-    );
-
     return {
       type,
       server,
@@ -697,131 +356,14 @@ function parseUri(uri) {
       name,
       identity,
       password,
-      security: query.security || "",
+      security: u.searchParams.get("security") || "",
       sni:
-        query.sni ||
-        query.peer ||
-        query.servername ||
+        u.searchParams.get("sni") ||
+        u.searchParams.get("peer") ||
+        u.searchParams.get("servername") ||
         "",
       uri,
-      query,
-      rawProxy: null,
-      sourceFormat: "uri"
-    };
-  } catch {
-    return null;
-  }
-}
-
-// ======================================
-// SS SIP002
-// ======================================
-
-function parseSsSip002(uri) {
-  try {
-    const u = new URL(uri);
-
-    const server = u.hostname;
-    const port = Number(u.port);
-
-    if (!server || !port) return null;
-
-    let userInfo = u.username;
-
-    if (!userInfo && u.password) {
-      userInfo = u.password;
-    }
-
-    let auth = safeDecode(userInfo);
-
-    if (!auth.includes(":")) {
-      auth = decodeBase64(auth) || auth;
-    }
-
-    const index = auth.indexOf(":");
-
-    if (index < 0) return null;
-
-    const cipher = auth.slice(0, index);
-    const password = auth.slice(index + 1);
-
-    let name = server;
-
-    if (u.hash) {
-      name = safeDecode(u.hash.slice(1));
-    }
-
-    return {
-      type: "ss",
-      server,
-      port,
-      name,
-      identity: `${cipher}:${password}`,
-      password: "",
-      security: "",
-      sni: "",
-      uri,
-      rawProxy: null,
-      sourceFormat: "uri"
-    };
-  } catch {
-    return null;
-  }
-}
-
-// ======================================
-// SS 旧格式
-// ======================================
-
-function parseLegacySS(uri) {
-  try {
-    const content = uri
-      .slice(5)
-      .split("#")[0];
-
-    const decoded = decodeBase64(content);
-
-    if (!decoded || !decoded.includes("@")) return null;
-
-    const at = decoded.lastIndexOf("@");
-    const auth = decoded.slice(0, at);
-    const address = decoded.slice(at + 1);
-
-    const colon = auth.indexOf(":");
-
-    if (colon < 0) return null;
-
-    const cipher = auth.slice(0, colon);
-    const password = auth.slice(colon + 1);
-
-    const addressMatch = address.match(
-      /^(.+):(\d+)$/
-    );
-
-    if (!addressMatch) return null;
-
-    let name = addressMatch[1];
-
-    try {
-      const hash = uri.split("#")[1];
-
-      if (hash) name = decodeURIComponent(hash);
-    } catch {
-      // 保留原始名称
-    }
-
-    return {
-      type: "ss",
-      server: addressMatch[1],
-      port: Number(addressMatch[2]),
-      name,
-      identity: `${cipher}:${password}`,
-      password: "",
-      security: "",
-      sni: "",
-      uri,
-      rawProxy: null,
-      sourceFormat: "uri"
+      rawProxy: null
     };
   } catch {
     return null;
@@ -841,15 +383,66 @@ function safeDecode(value) {
 }
 
 // ======================================
-// Clash / Mihomo YAML 转节点
+// SS 旧格式
+// ======================================
+
+function parseLegacySS(uri) {
+  try {
+    const content = uri.slice(5).split("#")[0];
+    const decoded = decodeBase64(content);
+
+    if (!decoded || !decoded.includes("@")) return null;
+
+    const at = decoded.lastIndexOf("@");
+    const auth = decoded.slice(0, at);
+    const address = decoded.slice(at + 1);
+
+    const colon = auth.indexOf(":");
+    if (colon < 0) return null;
+
+    const cipher = auth.slice(0, colon);
+    const password = auth.slice(colon + 1);
+
+    const addressMatch = address.match(/^(.+):(\d+)$/);
+    if (!addressMatch) return null;
+
+    let name = addressMatch[1];
+
+    try {
+      const hash = uri.split("#")[1];
+      if (hash) name = decodeURIComponent(hash);
+    } catch {
+      // 保留原始名称
+    }
+
+    return {
+      type: "ss",
+      server: addressMatch[1],
+      port: Number(addressMatch[2]),
+      name,
+      identity: `${cipher}:${password}`,
+      password: "",
+      security: "",
+      sni: "",
+      uri,
+      rawProxy: null
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ======================================
+// Clash YAML 转节点
 // ======================================
 
 function proxyToNode(p) {
   if (!p || typeof p !== "object") return null;
 
-  const type = normalizeType(p.type);
+  let type = String(p.type || "").toLowerCase();
 
   if (!SUPPORTED.has(type)) return null;
+  type = PROTOCOL_ALIASES[type] || type;
 
   const server = String(p.server || "");
   const port = Number(p.port || 0);
@@ -874,19 +467,6 @@ function proxyToNode(p) {
     password = String(p.password || "");
   }
 
-  if (type === "ss" || type === "ssr") {
-    identity = `${p.cipher || ""}:${p.password || ""}`;
-  }
-
-  if (type === "wireguard") {
-    identity = String(
-      p["private-key"] ||
-      p.privateKey ||
-      p.private_key ||
-      ""
-    );
-  }
-
   const node = {
     type,
     server,
@@ -895,432 +475,12 @@ function proxyToNode(p) {
     identity,
     password,
     security: String(p.tls || ""),
-    sni: String(
-      p.servername ||
-      p.sni ||
-      ""
-    ),
+    sni: String(p.servername || p.sni || ""),
     uri: "",
-    rawProxy: { ...p },
-    sourceFormat: "clash"
+    rawProxy: p
   };
 
   node.uri = buildNodeUri(node);
-
-  return node;
-}
-
-// ======================================
-// Sing-box JSON 解析
-// ======================================
-
-function parseSingBox(data) {
-  if (!data || typeof data !== "object") return [];
-
-  const outbounds = Array.isArray(data.outbounds)
-    ? data.outbounds
-    : [];
-
-  if (!outbounds.length) return [];
-
-  const nodes = [];
-
-  for (const outbound of outbounds) {
-    const node = singboxOutboundToNode(outbound);
-
-    if (node) nodes.push(node);
-  }
-
-  return nodes;
-}
-
-function singboxOutboundToNode(p) {
-  if (!p || typeof p !== "object") return null;
-
-  const originalType = String(p.type || "").toLowerCase();
-
-  if (!SINGBOX_TYPES.has(originalType)) return null;
-
-  const typeMap = {
-    shadowsocks: "ss",
-    shadowsocksr: "ssr",
-    socks: "socks5"
-  };
-
-  const type = typeMap[originalType] || normalizeType(originalType);
-
-  const server = String(p.server || "");
-  const port = Number(p.server_port || p.port || 0);
-
-  if (!server || !port || port < 1 || port > 65535) {
-    return null;
-  }
-
-  const tls = p.tls || {};
-  const transport = p.transport || {};
-
-  let identity = String(
-    p.uuid ||
-    p.password ||
-    p.auth ||
-    ""
-  );
-
-  let password = "";
-
-  if (type === "ss" || type === "ssr") {
-    identity = `${p.method || p.cipher || ""}:${p.password || ""}`;
-  }
-
-  if (type === "http" || type === "socks5") {
-    identity = String(p.username || "");
-    password = String(p.password || "");
-  }
-
-  if (type === "wireguard") {
-    identity = String(p.private_key || "");
-  }
-
-  const name = String(
-    p.tag ||
-    p.name ||
-    server
-  );
-
-  const node = {
-    type,
-    server,
-    port,
-    name,
-    identity,
-    password,
-    security: tls.enabled ? "tls" : "",
-    sni: String(tls.server_name || ""),
-    uri: "",
-    rawProxy: { ...p },
-    sourceFormat: "sing-box",
-    singboxData: {
-      tls,
-      transport
-    }
-  };
-
-  node.uri = buildNodeUri(node);
-
-  return node;
-}
-
-// ======================================
-// 其他 JSON 节点格式
-// ======================================
-
-function parseGenericJson(data) {
-  if (!data || typeof data !== "object") return [];
-
-  const candidates = [];
-
-  if (Array.isArray(data.nodes)) {
-    candidates.push(...data.nodes);
-  }
-
-  if (Array.isArray(data.proxies)) {
-    candidates.push(...data.proxies);
-  }
-
-  if (Array.isArray(data.servers)) {
-    candidates.push(...data.servers);
-  }
-
-  if (!candidates.length) return [];
-
-  return candidates
-    .map(proxyToNode)
-    .filter(Boolean);
-}
-
-// ======================================
-// Surge / Loon / Quantumult X
-// 常见 Proxy 行解析
-// ======================================
-
-function parseClientConfig(text) {
-  const lines = String(text || "").split(/\r?\n/);
-
-  const nodes = [];
-  let inProxySection = false;
-
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-
-    if (!line || line.startsWith("#") || line.startsWith(";")) {
-      continue;
-    }
-
-    const section = line.match(/^\[([^\]]+)\]$/);
-
-    if (section) {
-      inProxySection = /^(proxy|server|servers)$/i.test(
-        section[1].trim()
-      );
-
-      continue;
-    }
-
-    if (!inProxySection) {
-      // Quantumult X 部分配置没有 [Proxy] 区块
-      if (
-        /^(shadowsocks|vmess|vless|trojan|http|socks5|hysteria2)\s*=/i.test(line)
-      ) {
-        const qxNode = parseQuantumultLine(line);
-
-        if (qxNode) nodes.push(qxNode);
-      }
-
-      continue;
-    }
-
-    const node = parseCommaProxyLine(line);
-
-    if (node) nodes.push(node);
-  }
-
-  return nodes;
-}
-
-// ======================================
-// Surge / Loon 逗号配置
-// name = type, server, port, key=value
-// ======================================
-
-function parseCommaProxyLine(line) {
-  const index = line.indexOf("=");
-
-  if (index < 1) return null;
-
-  const name = line.slice(0, index).trim();
-  const body = line.slice(index + 1).trim();
-
-  if (!name || !body) return null;
-
-  const parts = splitComma(body);
-
-  if (parts.length < 3) return null;
-
-  const rawType = parts[0].trim().toLowerCase();
-
-  const typeMap = {
-    "shadowsocks": "ss",
-    "shadowsocksr": "ssr",
-    "socks": "socks5",
-    "socks5": "socks5",
-    "http": "http",
-    "https": "http",
-    "hysteria2": "hysteria2",
-    "hy2": "hysteria2"
-  };
-
-  const type = normalizeType(
-    typeMap[rawType] || rawType
-  );
-
-  if (!SUPPORTED.has(type)) return null;
-
-  const server = parts[1].trim();
-  const port = Number(parts[2]);
-
-  if (!server || !port || port > 65535) return null;
-
-  const options = {};
-
-  for (const item of parts.slice(3)) {
-    const i = item.indexOf("=");
-
-    if (i < 0) {
-      options[item.trim().toLowerCase()] = true;
-    } else {
-      options[item.slice(0, i).trim().toLowerCase()] =
-        item.slice(i + 1).trim();
-    }
-  }
-
-  const password = options.password || "";
-  const username = options.username || "";
-  const uuid = options.uuid || options.user || "";
-
-  let identity = uuid || password;
-
-  if (type === "ss") {
-    identity = `${options.encrypt-method || options.method || options.cipher || ""}:${password}`;
-  }
-
-  if (type === "http" || type === "socks5") {
-    identity = username;
-  }
-
-  const node = {
-    type,
-    server,
-    port,
-    name,
-    identity,
-    password:
-      type === "http" || type === "socks5"
-        ? password
-        : "",
-    security: options.tls || "",
-    sni:
-      options.sni ||
-      options.servername ||
-      options.peer ||
-      "",
-    uri: "",
-    rawProxy: {
-      name,
-      type,
-      server,
-      port,
-      ...options
-    },
-    sourceFormat: "surge"
-  };
-
-  node.uri = buildNodeUri(node);
-
-  return node;
-}
-
-// ======================================
-// 逗号分割，兼容引号
-// ======================================
-
-function splitComma(value) {
-  const result = [];
-  let current = "";
-  let quote = "";
-  let escaped = false;
-
-  for (const char of String(value)) {
-    if (escaped) {
-      current += char;
-      escaped = false;
-      continue;
-    }
-
-    if (char === "\\") {
-      escaped = true;
-      current += char;
-      continue;
-    }
-
-    if (
-      (char === '"' || char === "'") &&
-      (!quote || quote === char)
-    ) {
-      quote = quote ? "" : char;
-      continue;
-    }
-
-    if (char === "," && !quote) {
-      result.push(current.trim());
-      current = "";
-      continue;
-    }
-
-    current += char;
-  }
-
-  if (current.trim()) {
-    result.push(current.trim());
-  }
-
-  return result;
-}
-
-// ======================================
-// Quantumult X 常见节点行
-// ======================================
-
-function parseQuantumultLine(line) {
-  const index = line.indexOf("=");
-
-  if (index < 1) return null;
-
-  const rawType = line.slice(0, index).trim().toLowerCase();
-  const body = line.slice(index + 1).trim();
-
-  const typeMap = {
-    shadowsocks: "ss",
-    vmess: "vmess",
-    vless: "vless",
-    trojan: "trojan",
-    http: "http",
-    socks5: "socks5",
-    hysteria2: "hysteria2"
-  };
-
-  const type = typeMap[rawType];
-
-  if (!type) return null;
-
-  // 尝试解析 URL 形式参数
-  if (body.includes("://")) {
-    return parseUri(body);
-  }
-
-  const parts = splitComma(body);
-
-  if (parts.length < 2) return null;
-
-  const server = parts[0].trim();
-  const port = Number(parts[1]);
-
-  if (!server || !port || port > 65535) return null;
-
-  const options = {};
-
-  for (const item of parts.slice(2)) {
-    const i = item.indexOf("=");
-
-    if (i > 0) {
-      options[item.slice(0, i).trim().toLowerCase()] =
-        item.slice(i + 1).trim();
-    }
-  }
-
-  const name =
-    options.tag ||
-    options.remarks ||
-    options.name ||
-    server;
-
-  const identity =
-    options.password ||
-    options.uuid ||
-    options.user ||
-    "";
-
-  const node = {
-    type,
-    server,
-    port,
-    name,
-    identity,
-    password: options.password || "",
-    security: options.tls || "",
-    sni: options.peer || options.sni || "",
-    uri: "",
-    rawProxy: {
-      name,
-      type,
-      server,
-      port,
-      ...options
-    },
-    sourceFormat: "quantumult-x"
-  };
-
-  node.uri = buildNodeUri(node);
-
   return node;
 }
 
@@ -1329,16 +489,12 @@ function parseQuantumultLine(line) {
 // ======================================
 
 function buildNodeUri(n) {
-  const enc = value =>
-    encodeURIComponent(String(value ?? ""));
-
+  const enc = value => encodeURIComponent(String(value ?? ""));
   const p = n.rawProxy || {};
 
   const server = n.server;
   const port = n.port;
   const name = enc(n.name);
-
-  if (!server || !port) return "";
 
   if (n.type === "vmess") {
     const j = {
@@ -1347,37 +503,22 @@ function buildNodeUri(n) {
       add: server,
       port: String(port),
       id: p.uuid || n.identity,
-      aid: String(p.alterId ?? p.alter_id ?? 0),
-      scy: p.cipher || p.security || "auto",
+      aid: String(p.alterId ?? 0),
+      scy: p.cipher || "auto",
       net: p.network || "tcp",
       tls: p.tls ? "tls" : "",
-      sni: p.servername || p.sni || n.sni || ""
+      sni: p.servername || p.sni || ""
     };
 
     return "vmess://" + encodeBase64(JSON.stringify(j));
   }
 
   if (n.type === "ss") {
-    const identity = String(n.identity || "");
-    const index = identity.indexOf(":");
-
-    const cipher = index >= 0
-      ? identity.slice(0, index)
-      : p.cipher || "aes-128-gcm";
-
-    const password = index >= 0
-      ? identity.slice(index + 1)
-      : p.password || "";
-
-    const auth = encodeBase64(
-      `${cipher}:${password}`
-    );
+    const cipher = p.cipher || "aes-128-gcm";
+    const password = p.password || "";
+    const auth = encodeBase64(`${cipher}:${password}`);
 
     return `ss://${auth}@${server}:${port}#${name}`;
-  }
-
-  if (n.type === "ssr") {
-    return "";
   }
 
   if (n.type === "http" || n.type === "socks5") {
@@ -1393,54 +534,23 @@ function buildNodeUri(n) {
     return `${n.type}://${auth}${server}:${port}#${name}`;
   }
 
-  if (n.type === "wireguard") {
-    return "";
-  }
-
-  const scheme = n.type === "hysteria2"
-    ? "hysteria2"
-    : n.type;
-
-  const user =
-    p.uuid ||
-    p.password ||
-    p.auth ||
-    n.identity ||
-    "";
-
+  const scheme = n.type === "hysteria2" ? "hysteria2" : n.type;
+  const user = p.uuid || p.password || p.auth || n.identity || "";
   const auth = user ? `${enc(user)}@` : "";
 
   const q = new URLSearchParams();
 
   if (p.sni || p.servername || n.sni) {
-    q.set(
-      "sni",
-      p.sni || p.servername || n.sni
-    );
+    q.set("sni", p.sni || p.servername || n.sni);
   }
 
   if (p.encryption) q.set("encryption", p.encryption);
   if (p.flow) q.set("flow", p.flow);
   if (p.fingerprint) q.set("fp", p.fingerprint);
 
-  if (p.network) q.set("type", p.network);
-  if (p.alpn) {
-    q.set(
-      "alpn",
-      Array.isArray(p.alpn)
-        ? p.alpn.join(",")
-        : p.alpn
-    );
-  }
-
-  if (p.skipCertVerify) q.set("insecure", "1");
-
   const query = q.toString();
 
-  return (
-    `${scheme}://${auth}${server}:${port}` +
-    `${query ? "?" + query : ""}#${name}`
-  );
+  return `${scheme}://${auth}${server}:${port}${query ? "?" + query : ""}#${name}`;
 }
 
 // ======================================
@@ -1654,12 +764,7 @@ const REGION_BY_NAME = new Map();
 
 for (const line of REGION_DATA.trim().split("\n")) {
   const [name, code, aliasText = ""] = line.split("|");
-
-  const aliases = [
-    name,
-    ...aliasText.split(",")
-  ].filter(Boolean);
-
+  const aliases = [name, ...aliasText.split(",")].filter(Boolean);
   const item = { name, code, aliases };
 
   REGION_MAP.push(item);
@@ -1670,12 +775,7 @@ for (const line of REGION_DATA.trim().split("\n")) {
 }
 
 const REGION_MATCHERS = REGION_MAP
-  .flatMap(item =>
-    item.aliases.map(alias => ({
-      alias,
-      item
-    }))
-  )
+  .flatMap(item => item.aliases.map(alias => ({ alias, item })))
   .sort((a, b) => b.alias.length - a.alias.length);
 
 // ======================================
@@ -1694,10 +794,7 @@ function region(name) {
     const alias = entry.alias.toLowerCase();
 
     if (/[a-z]/i.test(alias)) {
-      const escaped = alias.replace(
-        /[.*+?^${}()|[\]\\]/g,
-        "\\$&"
-      );
+      const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
       const re = new RegExp(
         `(^|[^a-z])${escaped}([^a-z]|$)`,
@@ -1786,7 +883,6 @@ function parseUserinfo(value) {
 
   for (const part of String(value).split(";")) {
     const index = part.indexOf("=");
-
     if (index < 0) continue;
 
     const key = part.slice(0, index).trim().toLowerCase();
@@ -1817,9 +913,7 @@ function parseUserinfo(value) {
     download: fmt(download),
     used: fmt(used),
     total: total > 0 ? fmt(total) : "未知",
-    remaining: total > 0
-      ? fmt(Math.max(0, total - used))
-      : "未知",
+    remaining: total > 0 ? fmt(Math.max(0, total - used)) : "未知",
     expire: expireText
   };
 }
@@ -1844,6 +938,9 @@ function fmt(n) {
 
 // ======================================
 // 解析结果展示
+// renderResult(p, 20) = 展开
+// renderResult(p, 2)  = 折叠
+// Telegram HTML 排版
 // ======================================
 
 export function renderResult(p, nodeLimit = 20) {
@@ -1857,55 +954,54 @@ export function renderResult(p, nodeLimit = 20) {
   const protocols = p.protocolCounts || {};
   const regions = p.regionCounts || {};
 
+  // ======================================
   // 兼容旧缓存
+  // ======================================
+
   if (!p.protocolCounts || !p.regionCounts) {
     for (const n of nodes) {
       if (!p.protocolCounts) {
-        protocols[n.type] =
-          (protocols[n.type] || 0) + 1;
+        protocols[n.type] = (protocols[n.type] || 0) + 1;
       }
 
       if (!p.regionCounts) {
         const r = region(n.name);
-
-        regions[r] =
-          (regions[r] || 0) + 1;
+        regions[r] = (regions[r] || 0) + 1;
       }
     }
   }
 
-  const fingerprints = new Set(
-    nodes.map(getFingerprint)
-  );
+  const fingerprints = new Set(nodes.map(getFingerprint));
 
   const duplicateCount =
-    p.duplicateCount ??
-    (nodes.length - fingerprints.size);
+    p.duplicateCount ?? (nodes.length - fingerprints.size);
 
   const uniqueCount =
-    p.uniqueCount ??
-    fingerprints.size;
+    p.uniqueCount ?? fingerprints.size;
 
   const totalCount =
-    p.totalCount ??
-    nodes.length;
+    p.totalCount ?? nodes.length;
 
   const parsedCount =
-    p.parsedCount ??
-    totalCount;
+    p.parsedCount ?? totalCount;
 
   const truncatedCount =
-    p.truncatedCount ??
-    Math.max(0, parsedCount - nodes.length);
+    p.truncatedCount ?? Math.max(0, parsedCount - nodes.length);
 
+  // ======================================
   // 流量信息
+  // ======================================
+
   const info = parseUserinfo(
     p.headers?.userinfo ||
     p.headers?.["subscription-userinfo"] ||
     p.headers?.["Subscription-Userinfo"]
   );
 
+  // ======================================
   // 地区统计
+  // ======================================
+
   const regionEntries = Object.entries(regions)
     .sort((a, b) => b[1] - a[1]);
 
@@ -1917,7 +1013,10 @@ export function renderResult(p, nodeLimit = 20) {
     })
     .join(" ");
 
+  // ======================================
   // 协议类型
+  // ======================================
+
   const protocolNames = [...new Set(
     Object.keys(protocols).map(protocolLabel)
   )];
@@ -1926,7 +1025,10 @@ export function renderResult(p, nodeLimit = 20) {
     ? protocolNames.map(escapeHtml).join("、")
     : "未知";
 
+  // ======================================
   // 订阅链接
+  // ======================================
+
   let subscriptionText = "未提供";
 
   if (p.sourceUrl) {
@@ -1947,12 +1049,27 @@ export function renderResult(p, nodeLimit = 20) {
     }
   }
 
+  // ======================================
   // 机场名称
+  // ======================================
+
   const airportName = escapeHtml(
     getAirportName(p.sourceUrl)
   );
 
+  // ======================================
   // 节点列表
+  //
+  // 未知地区：🌐SS📢:每日更新
+  // 已知地区：🇩🇪AnyTLS 德国01 @clashv8
+  //
+  // 旗帜与协议之间不加空格
+  // 未知地区协议后不加空格
+  // 已知地区协议后只加一个空格
+  // 删除备注开头重复的地区国旗
+  // 不修改其他原始节点名称
+  // ======================================
+
   const visibleNodes = nodes.slice(0, limit);
 
   const hiddenCachedCount = Math.max(
@@ -1966,15 +1083,13 @@ export function renderResult(p, nodeLimit = 20) {
 
     let name = String(n.name || "");
 
-    if (
-      r !== "未知" &&
-      name.startsWith(regionFlag)
-    ) {
-      name = name
-        .slice(regionFlag.length)
-        .trimStart();
+    // 只删除备注开头重复的地区国旗
+    if (r !== "未知" && name.startsWith(regionFlag)) {
+      name = name.slice(regionFlag.length).trimStart();
     }
 
+    // 未知地区不添加空格
+    // 已知地区只添加一个空格
     const separator = r === "未知" ? "" : " ";
 
     return (
@@ -1985,7 +1100,10 @@ export function renderResult(p, nodeLimit = 20) {
     );
   });
 
+  // ======================================
   // 组装消息
+  // ======================================
+
   const lines = [
     "📡 <b>订阅解析报告</b>",
     "<i>SUBSCRIPTION ANALYSIS</i>",
@@ -2056,187 +1174,15 @@ export function exportBase64(nodes) {
 }
 
 // ======================================
-// Sing-box 转 Clash 节点
-// ======================================
-
-function singboxToClash(n) {
-  const p = n.rawProxy || {};
-  const tls = p.tls || {};
-  const transport = p.transport || {};
-
-  const result = {
-    name: n.name,
-    type: n.type,
-    server: n.server,
-    port: n.port
-  };
-
-  if (n.type === "vless" || n.type === "vmess") {
-    result.uuid = p.uuid || n.identity;
-  }
-
-  if (
-    n.type === "trojan" ||
-    n.type === "hysteria" ||
-    n.type === "hysteria2" ||
-    n.type === "anytls"
-  ) {
-    result.password = p.password || n.identity;
-  }
-
-  if (n.type === "tuic") {
-    result.uuid = p.uuid || n.identity;
-    result.password = p.password || "";
-  }
-
-  if (n.type === "ss" || n.type === "ssr") {
-    result.cipher = p.method || p.cipher || "";
-    result.password = p.password || "";
-  }
-
-  if (n.type === "http" || n.type === "socks5") {
-    if (p.username) result.username = p.username;
-    if (p.password) result.password = p.password;
-  }
-
-  if (n.type === "wireguard") {
-    result["private-key"] =
-      p.private_key ||
-      p.privateKey ||
-      "";
-
-    result.public_key =
-      p.peer_public_key ||
-      p.public_key ||
-      "";
-
-    result.ip = p.local_address || p.address || [];
-    result.ipv6 = p.local_address || [];
-    result.mtu = p.mtu || 1280;
-  }
-
-  if (tls.enabled) {
-    result.tls = true;
-
-    if (tls.server_name) {
-      result.servername = tls.server_name;
-    }
-
-    if (tls.insecure) {
-      result["skip-cert-verify"] = true;
-    }
-
-    if (tls.alpn) {
-      result.alpn = tls.alpn;
-    }
-
-    if (tls.utls?.fingerprint) {
-      result["client-fingerprint"] =
-        tls.utls.fingerprint;
-    }
-  }
-
-  if (transport.type) {
-    result.network = transport.type;
-
-    if (transport.type === "ws") {
-      result["ws-opts"] = {
-        path: transport.path || "/",
-        headers: transport.headers || {}
-      };
-    }
-
-    if (transport.type === "grpc") {
-      result["grpc-opts"] = {
-        "grpc-service-name":
-          transport.service_name || ""
-      };
-    }
-  }
-
-  if (p.flow) result.flow = p.flow;
-  if (p.alter_id !== undefined) result.alterId = p.alter_id;
-  if (p.packet_encoding) result["packet-encoding"] = p.packet_encoding;
-
-  return result;
-}
-
-// ======================================
-// URI / Clash 节点转 Clash YAML
+// URI 转 Clash YAML
 // ======================================
 
 function nodeToClash(n) {
-  if (!n) return null;
-
-  // 原生 Clash 配置：完整保留原字段
-  if (
-    n.rawProxy &&
-    n.sourceFormat === "clash"
-  ) {
+  if (n.rawProxy) {
     return {
       ...n.rawProxy,
       name: n.name
     };
-  }
-
-  // Sing-box 配置：转换字段
-  if (
-    n.rawProxy &&
-    n.sourceFormat === "sing-box"
-  ) {
-    return singboxToClash(n);
-  }
-
-  // Surge / Quantumult X：使用已识别字段
-  if (
-    n.rawProxy &&
-    (
-      n.sourceFormat === "surge" ||
-      n.sourceFormat === "quantumult-x"
-    )
-  ) {
-    const p = n.rawProxy;
-
-    const result = {
-      name: n.name,
-      type: n.type,
-      server: n.server,
-      port: n.port
-    };
-
-    if (n.type === "vless" || n.type === "vmess") {
-      result.uuid = p.uuid || p.user || n.identity;
-    }
-
-    if (
-      n.type === "trojan" ||
-      n.type === "hysteria" ||
-      n.type === "hysteria2" ||
-      n.type === "anytls"
-    ) {
-      result.password = p.password || n.identity;
-    }
-
-    if (n.type === "ss") {
-      const index = String(n.identity).indexOf(":");
-
-      if (index >= 0) {
-        result.cipher = n.identity.slice(0, index);
-        result.password = n.identity.slice(index + 1);
-      }
-    }
-
-    if (n.type === "http" || n.type === "socks5") {
-      if (n.identity) result.username = n.identity;
-      if (n.password) result.password = n.password;
-    }
-
-    if (n.sni) {
-      result.servername = n.sni;
-      result.tls = true;
-    }
-
-    return result;
   }
 
   const p = {
@@ -2252,23 +1198,16 @@ function nodeToClash(n) {
     p.uuid = identity;
   }
 
-  if (
-    n.type === "trojan" ||
-    n.type === "anytls"
-  ) {
+  if (n.type === "trojan" || n.type === "anytls") {
     p.password = identity;
   }
 
-  if (
-    n.type === "hysteria" ||
-    n.type === "hysteria2"
-  ) {
+  if (n.type === "hysteria" || n.type === "hysteria2") {
     p.password = identity;
   }
 
   if (n.type === "tuic") {
     p.uuid = identity;
-    if (n.password) p.password = n.password;
   }
 
   if (n.type === "ss") {
@@ -2290,8 +1229,6 @@ function nodeToClash(n) {
     p.tls = true;
   }
 
-  if (n.query?.flow) p.flow = n.query.flow;
-
   return p;
 }
 
@@ -2300,10 +1237,7 @@ function nodeToClash(n) {
 // ======================================
 
 export function exportYaml(nodes) {
-  const proxies = (nodes || [])
-    .map(nodeToClash)
-    .filter(Boolean);
-
+  const proxies = (nodes || []).map(nodeToClash);
   const proxyNames = proxies.map(x => x.name);
 
   return YAML.stringify({
