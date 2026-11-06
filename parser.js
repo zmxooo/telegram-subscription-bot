@@ -1904,36 +1904,108 @@ function maskSubscriptionUrl(value) {
 }
 
 // ======================================
-// 机场名称
+// 机场名称识别
+// 优先使用服务器响应头，不从 URL 猜名称
 // ======================================
 
-function getAirportName(sourceUrl) {
-  if (!sourceUrl) return "文本/文件解析";
+function getAirportName(headers = {}) {
+  // 兼容不同缓存版本和字段大小写
+  const profileTitle =
+    headers.profileTitle ||
+    headers["profile-title"] ||
+    headers.ProfileTitle ||
+    "";
 
-  try {
-    const u = new URL(sourceUrl);
+  const contentDisposition =
+    headers.contentDisposition ||
+    headers["content-disposition"] ||
+    headers.ContentDisposition ||
+    "";
 
-    const parts = u.pathname
-      .split("/")
-      .filter(Boolean);
+  function cleanName(value) {
+    let name = String(value || "").trim();
 
-    if (parts.length) {
-      let name = safeDecode(
-        parts[parts.length - 1]
-      );
+    if (!name) return "";
 
-      name = name.replace(
-        /\.(yaml|yml|txt|json|conf)$/i,
-        ""
-      );
+    // 去除外围引号
+    name = name.replace(/^["']|["']$/g, "").trim();
 
-      return name || u.hostname;
+    // 去除控制字符
+    name = name.replace(/[\u0000-\u001F\u007F]/g, "");
+
+    return name.trim();
+  }
+
+  // 第一优先级：profile-title
+  const title = cleanName(profileTitle);
+
+  if (title) {
+    return title;
+  }
+
+  // 第二优先级：Content-Disposition 文件名
+  if (contentDisposition) {
+    let filename = "";
+
+    // 优先读取 RFC 5987 filename*
+    const filenameStar = contentDisposition.match(
+      /filename\*\s*=\s*(?:UTF-8''|utf-8'')?([^;]+)/i
+    );
+
+    if (filenameStar) {
+      filename = filenameStar[1]
+        .trim()
+        .replace(/^["']|["']$/g, "");
+
+      try {
+        filename = decodeURIComponent(filename);
+      } catch {
+        // 解码失败时保留原始文件名
+      }
     }
 
-    return u.hostname;
-  } catch {
-    return "未知";
+    // 普通 filename
+    if (!filename) {
+      const match = contentDisposition.match(
+        /filename\s*=\s*(?:"([^"]+)"|'([^']+)'|([^;]+))/i
+      );
+
+      if (match) {
+        filename = match[1] || match[2] || match[3] || "";
+      }
+    }
+
+    filename = cleanName(filename);
+
+    // 去除常见文件扩展名
+    filename = filename.replace(
+      /\.(yaml|yml|txt|json|conf|ini|list)$/i,
+      ""
+    );
+
+    // 排除通用文件名，避免误当机场名称
+    const genericNames = new Set([
+      "sub",
+      "subscription",
+      "config",
+      "configuration",
+      "download",
+      "export",
+      "index",
+      "nodes",
+      "node"
+    ]);
+
+    if (
+      filename &&
+      !genericNames.has(filename.toLowerCase())
+    ) {
+      return filename;
+    }
   }
+
+  // 没有可靠名称时不猜测
+  return "未提供订阅名称";
 }
 
 // ======================================
@@ -2140,7 +2212,7 @@ export function renderResult(p, nodeLimit = 20) {
   }
 
   const airportName = escapeHtml(
-    getAirportName(p.sourceUrl)
+    getAirportName(p.headers || {})
   );
 
   const visibleNodes = nodes.slice(0, limit);
