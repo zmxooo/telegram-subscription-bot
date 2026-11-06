@@ -1076,33 +1076,6 @@ async function requestSubscription(url) {
 }
 
 // ======================================
-// 诊断正文脱敏
-// ======================================
-
-function sanitizeDiagnosticPreview(value) {
-  return String(value || "")
-    .slice(0, 500)
-
-    // URL 查询参数中的敏感值
-    .replace(
-      /([?&](?:token|key|auth|password|secret)=)[^&#\s"'<>]*/gi,
-      "$1[REDACTED]"
-    )
-
-    // YAML 中常见的敏感字段
-    .replace(
-      /^(\s*(?:password|token|secret|uuid|private-key|private_key)\s*:\s*).+$/gim,
-      "$1[REDACTED]"
-    )
-
-    // JSON 中常见的敏感字段
-    .replace(
-      /("(?:password|token|secret|uuid|privateKey)"\s*:\s*")[^"]*(")/gi,
-      "$1[REDACTED]$2"
-    );
-}
-
-// ======================================
 // 下载订阅
 // 支持多级重定向、多策略请求
 // ======================================
@@ -1255,6 +1228,7 @@ export async function fetchSubscription(
 
   // ======================================
   // 真实订阅响应诊断日志
+  // 不脱敏，直接输出原始内容
   // ======================================
 
   console.log("订阅响应诊断：", {
@@ -1282,8 +1256,12 @@ export async function fetchSubscription(
       "server"
     ),
 
-    bodyPreview: sanitizeDiagnosticPreview(text)
+    bodyPreview: text.slice(0, 500)
   });
+
+  // ======================================
+  // 返回订阅正文和响应头
+  // ======================================
 
   return {
     text,
