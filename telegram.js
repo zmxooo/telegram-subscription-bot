@@ -1,4 +1,3 @@
-
 import {
   parseInput,
   renderResult,
@@ -703,14 +702,15 @@ export async function handleTelegramUpdate(
       env
     );
 
+    // 默认折叠：显示前 5 个节点
     await reply(
       env,
       chatId,
-      renderResult(parsed, 20),
+      renderResult(parsed, 5),
       {
         reply_markup: callbackKeyboard(
           key,
-          true
+          false
         )
       }
     );
@@ -871,7 +871,10 @@ async function toggleNodes(
   data
 ) {
   const expanded = state === "1";
-  const limit = expanded ? 20 : 2;
+
+  // 展开仍然显示原来的 20 个
+  // 折叠由原来的 2 个改成 5 个
+  const limit = expanded ? 20 : 5;
 
   await editMessage(
     env,
