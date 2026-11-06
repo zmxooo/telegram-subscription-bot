@@ -34,9 +34,26 @@ const PROTOCOL_LABELS = {
   wireguard: "WireGuard"
 };
 
-function protocolLabel(type) {
+function normalizeType(type) {
   const key = String(type || "").toLowerCase();
+  return PROTOCOL_ALIASES[key] || key;
+}
+
+function protocolLabel(type) {
+  const key = normalizeType(type);
   return PROTOCOL_LABELS[key] || String(type || "未知");
+}
+
+function validPort(value) {
+  if (value === null || value === undefined || value === "") {
+    return 0;
+  }
+
+  const port = Number(value);
+
+  return Number.isInteger(port) && port >= 1 && port <= 65535
+    ? port
+    : 0;
 }
 
 function emptyResult() {
@@ -52,30 +69,20 @@ function emptyResult() {
   };
 }
 
-function normalizeType(type) {
-  const key = String(type || "").toLowerCase();
-  return PROTOCOL_ALIASES[key] || key;
-}
-
-function validPort(value) {
-  const port = Number(value);
-  return Number.isInteger(port) && port >= 1 && port <= 65535
-    ? port
-    : 0;
-}
-
 // ======================================
 // 主解析入口
 // ======================================
 
 export function parseInput(input, maxNodes = 1000) {
-  let text = String(input || "").replace(/^\uFEFF/, "").trim();
+  let text = String(input || "")
+    .replace(/^\uFEFF/, "")
+    .trim();
 
   if (!text) return emptyResult();
 
   let nodes = [];
 
-  // 1. JSON：Sing-box 等
+  // 1. JSON
   const json = tryJson(text);
 
   if (json) {
@@ -83,10 +90,12 @@ export function parseInput(input, maxNodes = 1000) {
       nodes = parseSingbox(json);
     } else if (Array.isArray(json.proxies)) {
       nodes = json.proxies.map(proxyToNode).filter(Boolean);
+    } else if (Array.isArray(json)) {
+      nodes = json.map(proxyToNode).filter(Boolean);
     }
   }
 
-  // 2. YAML：Clash / Mihomo
+  // 2. YAML
   if (!nodes.length) {
     const yaml = tryYaml(text);
 
@@ -102,27 +111,31 @@ export function parseInput(input, maxNodes = 1000) {
     if (decoded) text = decoded;
   }
 
-  // 4. 解码后再次检查 JSON
+  // 4. 解码后再次识别 JSON
   if (!nodes.length) {
-    const json = tryJson(text);
+    const decodedJson = tryJson(text);
 
-    if (json && Array.isArray(json.outbounds)) {
-      nodes = parseSingbox(json);
-    } else if (json && Array.isArray(json.proxies)) {
-      nodes = json.proxies.map(proxyToNode).filter(Boolean);
+    if (decodedJson) {
+      if (Array.isArray(decodedJson.outbounds)) {
+        nodes = parseSingbox(decodedJson);
+      } else if (Array.isArray(decodedJson.proxies)) {
+        nodes = decodedJson.proxies.map(proxyToNode).filter(Boolean);
+      } else if (Array.isArray(decodedJson)) {
+        nodes = decodedJson.map(proxyToNode).filter(Boolean);
+      }
     }
   }
 
-  // 5. 解码后再次检查 YAML
+  // 5. 解码后再次识别 YAML
   if (!nodes.length) {
-    const yaml = tryYaml(text);
+    const decodedYaml = tryYaml(text);
 
-    if (yaml && Array.isArray(yaml.proxies)) {
-      nodes = yaml.proxies.map(proxyToNode).filter(Boolean);
+    if (decodedYaml && Array.isArray(decodedYaml.proxies)) {
+      nodes = decodedYaml.proxies.map(proxyToNode).filter(Boolean);
     }
   }
 
-  // 6. Surge / Loon / Quantumult X 常见文本
+  // 6. 识别配置文本
   if (!nodes.length) {
     nodes = parseConfigText(text);
   }
@@ -132,7 +145,11 @@ export function parseInput(input, maxNodes = 1000) {
     for (const line of text.split(/\r?\n/)) {
       const value = line.trim();
 
-      if (!value || value.startsWith("#") || value.startsWith(";")) {
+      if (
+        !value ||
+        value.startsWith("#") ||
+        value.startsWith(";")
+      ) {
         continue;
       }
 
@@ -167,18 +184,22 @@ export function parseInput(input, maxNodes = 1000) {
   }
 
   // ======================================
-  // 限制缓存数量
+  // 缓存数量限制
   // ======================================
 
-  let limit = Number(maxNodes);
+  let limit;
 
   if (maxNodes === Infinity) {
     limit = totalCount;
-  } else if (!Number.isFinite(limit)) {
-    limit = 1000;
+  } else {
+    limit = Number(maxNodes);
+
+    if (!Number.isFinite(limit)) {
+      limit = 1000;
+    }
   }
 
-  limit = Math.max(1, Math.floor(limit));
+  limit = Math.max(0, Math.floor(limit));
 
   const limitedNodes = nodes.slice(0, limit);
 
@@ -201,7 +222,10 @@ export function parseInput(input, maxNodes = 1000) {
 function tryJson(text) {
   const value = String(text || "").trim();
 
-  if (!value.startsWith("{") && !value.startsWith("[")) {
+  if (
+    !value.startsWith("{") &&
+    !value.startsWith("[")
+  ) {
     return null;
   }
 
@@ -219,13 +243,18 @@ function tryJson(text) {
 function tryYaml(text) {
   const value = String(text || "").trim();
 
-  if (!/^(?:proxies|mixed-port|port|proxy-groups|rules|dns)\s*:/m.test(value)) {
+  if (
+    !/^(?:proxies|mixed-port|port|proxy-groups|rules|dns)\s*:/m.test(value)
+  ) {
     return null;
   }
 
   try {
     const parsed = YAML.parse(value);
-    return parsed && typeof parsed === "object" ? parsed : null;
+
+    return parsed && typeof parsed === "object"
+      ? parsed
+      : null;
   } catch {
     return null;
   }
@@ -240,8 +269,8 @@ function decodeBase64(text) {
 
   if (
     !clean ||
-    !/^[A-Za-z0-9+/_=-]+$/.test(clean) ||
-    clean.length < 8
+    clean.length < 8 ||
+    !/^[A-Za-z0-9+/_=-]+$/.test(clean)
   ) {
     return null;
   }
@@ -252,7 +281,9 @@ function decodeBase64(text) {
       .replace(/_/g, "/")
       .replace(/=+$/, "");
 
-    if (normalized.length % 4 === 1) return null;
+    if (normalized.length % 4 === 1) {
+      return null;
+    }
 
     normalized += "=".repeat(
       (4 - normalized.length % 4) % 4
@@ -291,19 +322,24 @@ function looksLikeConfig(text) {
     /^\s*(?:proxies|outbounds)\s*[:{]/m.test(value) ||
     /^\s*\[Proxy\]/im.test(value) ||
     /^\s*\[General\]/im.test(value) ||
-    /^\s*\[节点\]/im.test(value)
+    /^\s*\[节点\]/im.test(value) ||
+    /^\s*\[server_local\]/im.test(value)
   );
 }
 
 function decodeSubscription(input) {
   let current = String(input || "").trim();
 
-  for (let i = 0; i < 4; i++) {
-    if (looksLikeConfig(current)) return current;
+  for (let i = 0; i < 5; i++) {
+    if (looksLikeConfig(current)) {
+      return current;
+    }
 
     const decoded = decodeBase64(current);
 
-    if (!decoded || decoded === current) break;
+    if (!decoded || decoded === current) {
+      break;
+    }
 
     current = decoded.trim();
   }
@@ -333,7 +369,8 @@ function encodeBase64(text) {
 function isSupportedUri(uri) {
   const match = String(uri).match(/^([a-z0-9]+):\/\//i);
 
-  return !!match && SUPPORTED.has(match[1].toLowerCase());
+  return !!match &&
+    SUPPORTED.has(match[1].toLowerCase());
 }
 
 // ======================================
@@ -349,8 +386,27 @@ function safeDecode(value) {
 }
 
 function safeBase64Decode(value) {
-  const decoded = decodeBase64(value);
-  return decoded || "";
+  return decodeBase64(value) || "";
+}
+
+function safeJsonStringify(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "";
+  }
+}
+
+function getUrlName(uri, fallback = "") {
+  try {
+    const u = new URL(uri);
+
+    return u.hash.length > 1
+      ? safeDecode(u.hash.slice(1))
+      : fallback || u.hostname;
+  } catch {
+    return fallback;
+  }
 }
 
 // ======================================
@@ -359,14 +415,19 @@ function safeBase64Decode(value) {
 
 function decodeVmess(uri) {
   try {
-    const raw = uri.slice("vmess://".length).split("#")[0];
+    const raw = uri
+      .slice("vmess://".length)
+      .split("#")[0];
+
     const decoded = decodeBase64(raw);
 
     if (!decoded) return null;
 
     const j = JSON.parse(decoded);
 
-    if (!j.add || !j.port || !j.id) return null;
+    if (!j.add || !j.port || !j.id) {
+      return null;
+    }
 
     const port = validPort(j.port);
 
@@ -392,7 +453,7 @@ function decodeVmess(uri) {
 }
 
 // ======================================
-// SS SIP002 / 旧格式解析
+// SS SIP002 / 旧格式
 // ======================================
 
 function parseSS(uri) {
@@ -408,13 +469,15 @@ function parseSS(uri) {
       ? body.slice(hashIndex + 1)
       : "";
 
-    let name = rawName ? safeDecode(rawName) : "";
+    let name = rawName
+      ? safeDecode(rawName)
+      : "";
 
-    // SIP002：ss://base64(method:password)@server:port
+    // SIP002
     if (rawBody.includes("@")) {
       const at = rawBody.lastIndexOf("@");
 
-      let auth = rawBody.slice(0, at);
+      const auth = rawBody.slice(0, at);
       const address = rawBody.slice(at + 1);
 
       let decodedAuth = auth;
@@ -433,18 +496,17 @@ function parseSS(uri) {
       const password = decodedAuth.slice(colon + 1);
 
       const addressUrl = new URL("ss://" + address);
+
       const server = addressUrl.hostname;
       const port = validPort(addressUrl.port);
 
       if (!server || !port) return null;
 
-      if (!name) name = server;
-
       return {
         type: "ss",
         server,
         port,
-        name,
+        name: name || server,
         identity: `${cipher}:${password}`,
         password: "",
         security: "",
@@ -455,14 +517,18 @@ function parseSS(uri) {
       };
     }
 
-    // 旧格式：ss://base64(method:password@server:port)
+    // 旧格式
     const decoded = decodeBase64(rawBody);
 
-    if (!decoded || !decoded.includes("@")) return null;
+    if (!decoded || !decoded.includes("@")) {
+      return null;
+    }
 
     const at = decoded.lastIndexOf("@");
+
     const auth = decoded.slice(0, at);
     const address = decoded.slice(at + 1);
+
     const colon = auth.indexOf(":");
 
     if (colon < 1) return null;
@@ -471,18 +537,17 @@ function parseSS(uri) {
     const password = auth.slice(colon + 1);
 
     const addressUrl = new URL("ss://" + address);
+
     const server = addressUrl.hostname;
     const port = validPort(addressUrl.port);
 
     if (!server || !port) return null;
 
-    if (!name) name = server;
-
     return {
       type: "ss",
       server,
       port,
-      name,
+      name: name || server,
       identity: `${cipher}:${password}`,
       password: "",
       security: "",
@@ -502,12 +567,16 @@ function parseSS(uri) {
 
 function parseSSR(uri) {
   try {
-    const raw = uri.slice("ssr://".length).split("#")[0];
+    const raw = uri
+      .slice("ssr://".length)
+      .split("#")[0];
+
     const decoded = decodeBase64(raw);
 
     if (!decoded) return null;
 
     const slashIndex = decoded.indexOf("/?");
+
     const main = slashIndex >= 0
       ? decoded.slice(0, slashIndex)
       : decoded;
@@ -525,9 +594,14 @@ function parseSSR(uri) {
     const protocol = fields[2];
     const method = fields[3];
     const obfs = fields[4];
-    const password = safeBase64Decode(fields.slice(5).join(":"));
 
-    if (!server || !port || !method || !password) return null;
+    const password = safeBase64Decode(
+      fields.slice(5).join(":")
+    );
+
+    if (!server || !port || !method || !password) {
+      return null;
+    }
 
     const params = new URLSearchParams(queryText);
 
@@ -538,15 +612,10 @@ function parseSSR(uri) {
     if (hashIndex >= 0) {
       name = safeDecode(uri.slice(hashIndex + 1));
     } else if (params.get("remarks")) {
-      name = safeBase64Decode(params.get("remarks")) ||
+      name =
+        safeBase64Decode(params.get("remarks")) ||
         safeDecode(params.get("remarks"));
     }
-
-    const ssrData = {
-      protocol,
-      obfs,
-      params: Object.fromEntries(params.entries())
-    };
 
     return {
       type: "ssr",
@@ -559,7 +628,11 @@ function parseSSR(uri) {
       sni: "",
       uri,
       rawProxy: null,
-      ssrData,
+      ssrData: {
+        protocol,
+        obfs,
+        params: Object.fromEntries(params.entries())
+      },
       params: {}
     };
   } catch {
@@ -576,6 +649,7 @@ function parseMierus(uri) {
     const u = new URL(uri);
 
     const server = u.hostname;
+
     if (!server) return null;
 
     const username = safeDecode(u.username);
@@ -593,12 +667,10 @@ function parseMierus(uri) {
       .map(validPort)
       .filter(Boolean);
 
-    const port = validPorts[0] || 0;
-
     return {
       type: "mieru",
       server,
-      port,
+      port: validPorts[0] || 0,
       name,
       identity: username,
       password,
@@ -637,7 +709,12 @@ function parseUri(uri) {
 
     if (!SUPPORTED.has(type)) return null;
 
-    // Mieru 标准分享链接是 Protobuf 配置，不按普通 URL 解析
+    if (type === "vmess") return decodeVmess(uri);
+    if (type === "ss") return parseSS(uri);
+    if (type === "ssr") return parseSSR(uri);
+    if (type === "mierus") return parseMierus(uri);
+
+    // 标准 Mieru 分享链接是 Protobuf opaque 配置
     if (type === "mieru") {
       return {
         type: "mieru",
@@ -655,11 +732,6 @@ function parseUri(uri) {
       };
     }
 
-    if (type === "vmess") return decodeVmess(uri);
-    if (type === "ss") return parseSS(uri);
-    if (type === "ssr") return parseSSR(uri);
-    if (type === "mierus") return parseMierus(uri);
-
     type = normalizeType(type);
 
     const u = new URL(uri);
@@ -668,18 +740,16 @@ function parseUri(uri) {
 
     if (!server || !port) return null;
 
-    let name = server;
-
-    if (u.hash.length > 1) {
-      name = safeDecode(u.hash.slice(1));
-    }
+    const name = getUrlName(uri, server);
 
     const identity = safeDecode(u.username || "");
     const password = safeDecode(u.password || "");
 
-    const params = Object.fromEntries(u.searchParams.entries());
+    const params = Object.fromEntries(
+      u.searchParams.entries()
+    );
 
-    return {
+    const node = {
       type,
       server,
       port,
@@ -697,6 +767,8 @@ function parseUri(uri) {
       rawProxy: null,
       params
     };
+
+    return node;
   } catch {
     return null;
   }
@@ -709,36 +781,25 @@ function parseUri(uri) {
 function proxyToNode(p) {
   if (!p || typeof p !== "object") return null;
 
-  let type = String(p.type || "").toLowerCase();
+  const sourceType = String(p.type || "").toLowerCase();
 
-  if (!SUPPORTED.has(type)) return null;
+  if (!SUPPORTED.has(sourceType)) return null;
 
-  type = normalizeType(type);
+  const type = normalizeType(sourceType);
 
   const server = String(p.server || "");
   const port = validPort(p.port || 0);
 
   if (type !== "mieru") {
     if (!server || !port) return null;
-  } else if (!server || (!port && !p["port-range"])) {
+  } else if (
+    !server ||
+    (!port && !p["port-range"])
+  ) {
     return null;
   }
 
   const name = String(p.name ?? server);
-
-  const identity = String(
-    p.uuid ??
-    p.username ??
-    p.password ??
-    p.auth ??
-    ""
-  );
-
-  let password = "";
-
-  if (type === "http" || type === "socks5") {
-    password = String(p.password || "");
-  }
 
   if (type === "mieru") {
     return {
@@ -777,6 +838,34 @@ function proxyToNode(p) {
     };
   }
 
+  let identity = String(
+    p.uuid ??
+    p.username ??
+    p.password ??
+    p.auth ??
+    ""
+  );
+
+  let password = "";
+
+  if (type === "tuic") {
+    identity = String(p.uuid || "");
+    password = String(p.password || "");
+  }
+
+  if (type === "ss") {
+    identity = `${p.cipher || ""}:${p.password || ""}`;
+  }
+
+  if (type === "ssr") {
+    identity = `${p.cipher || ""}:${p.password || ""}`;
+  }
+
+  if (type === "http" || type === "socks5") {
+    identity = String(p.username || "");
+    password = String(p.password || "");
+  }
+
   const node = {
     type,
     server,
@@ -784,13 +873,14 @@ function proxyToNode(p) {
     name,
     identity,
     password,
-    security: String(p.tls || ""),
+    security: p.tls ? "tls" : "",
     sni: String(p.servername || p.sni || ""),
     uri: "",
     rawProxy: p,
     params: {}
   };
 
+  // 原始 Clash 节点优先保留
   node.uri = buildNodeUri(node);
 
   return node;
@@ -807,26 +897,58 @@ function parseSingbox(config) {
     shadowsocks: "ss",
     shadowsocksr: "ssr",
     socks: "socks5",
-    hysteria2: "hysteria2",
     wireguard: "wireguard",
     mieru: "mieru"
   };
 
   for (const outbound of config.outbounds || []) {
-    if (!outbound || typeof outbound !== "object") continue;
+    if (!outbound || typeof outbound !== "object") {
+      continue;
+    }
 
-    const sourceType = String(outbound.type || "").toLowerCase();
-    const normalized = normalizeType(aliases[sourceType] || sourceType);
+    const sourceType = String(
+      outbound.type || ""
+    ).toLowerCase();
 
-    if (!SUPPORTED.has(sourceType) && !SUPPORTED.has(normalized)) {
+    const normalized = normalizeType(
+      aliases[sourceType] || sourceType
+    );
+
+    if (
+      !SUPPORTED.has(sourceType) &&
+      !SUPPORTED.has(normalized)
+    ) {
+      continue;
+    }
+
+    // selector、direct、block 等非代理 outbound 不处理
+    if (
+      ["selector", "urltest", "direct", "block", "dns", "dns-out"].includes(sourceType)
+    ) {
       continue;
     }
 
     const server = String(outbound.server || "");
-    const port = validPort(outbound.server_port || outbound.port || 0);
 
-    // WireGuard 与 Mieru 配置字段可能不同，保留完整字段
-    if (!server || (!port && normalized !== "wireguard" && normalized !== "mieru")) {
+    const port = validPort(
+      outbound.server_port ??
+      outbound.port ??
+      0
+    );
+
+    if (
+      !server &&
+      normalized !== "wireguard" &&
+      normalized !== "mieru"
+    ) {
+      continue;
+    }
+
+    if (
+      !port &&
+      normalized !== "wireguard" &&
+      normalized !== "mieru"
+    ) {
       continue;
     }
 
@@ -839,10 +961,15 @@ function parseSingbox(config) {
       outbound.username ||
       "";
 
-    const name = String(outbound.tag || server || "未命名节点");
+    const name = String(
+      outbound.tag ||
+      server ||
+      "未命名节点"
+    );
 
     if (normalized === "ss") {
-      identity = `${outbound.method || ""}:${outbound.password || ""}`;
+      identity =
+        `${outbound.method || ""}:${outbound.password || ""}`;
     }
 
     if (normalized === "wireguard") {
@@ -885,11 +1012,12 @@ function parseSingbox(config) {
 }
 
 // ======================================
-// CSV 分割：处理带引号的逗号
+// CSV 分割：支持引号、逗号
 // ======================================
 
 function splitCsv(line) {
   const result = [];
+
   let current = "";
   let quoted = false;
 
@@ -924,12 +1052,40 @@ function splitCsv(line) {
 }
 
 // ======================================
-// Surge / Loon / Quantumult X
+// 参数解析
 // ======================================
 
-function parseConfigText(text) {
-  const source = String(text || "");
+function parseOptions(parts) {
+  const options = {};
+
+  for (const part of parts || []) {
+    const index = part.indexOf("=");
+
+    if (index < 0) continue;
+
+    const key = part
+      .slice(0, index)
+      .trim()
+      .toLowerCase();
+
+    const value = part
+      .slice(index + 1)
+      .trim();
+
+    if (key) options[key] = value;
+  }
+
+  return options;
+}
+
+// ======================================
+// Surge / Loon
+// ======================================
+
+function parseSurgeLoon(text) {
   const result = [];
+
+  let section = "";
 
   const map = {
     ss: "ss",
@@ -949,9 +1105,7 @@ function parseConfigText(text) {
     mieru: "mieru"
   };
 
-  let section = "";
-
-  for (const rawLine of source.split(/\r?\n/)) {
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
     const line = rawLine.trim();
 
     if (
@@ -969,108 +1123,152 @@ function parseConfigText(text) {
       continue;
     }
 
-    // Surge / Loon [Proxy]
-    if (section === "proxy") {
-      const parts = splitCsv(line);
+    if (section !== "proxy") continue;
 
-      if (parts.length < 4) continue;
+    const parts = splitCsv(line);
 
-      const name = parts[0];
-      const server = parts[1];
-      const port = validPort(parts[2]);
-      const type = map[String(parts[3] || "").toLowerCase()];
+    if (parts.length < 4) continue;
 
-      if (!server || !port || !type) continue;
+    const name = parts[0];
+    const server = parts[1];
+    const port = validPort(parts[2]);
 
-      const options = {};
+    const type = map[
+      String(parts[3] || "").toLowerCase()
+    ];
 
-      for (const part of parts.slice(4)) {
-        const index = part.indexOf("=");
+    if (!server || !port || !type) continue;
 
-        if (index < 0) continue;
+    const options = parseOptions(parts.slice(4));
 
-        const key = part.slice(0, index).trim().toLowerCase();
-        const value = part.slice(index + 1).trim();
-
-        options[key] = value;
-      }
-
-      const identity =
+    const node = {
+      type,
+      server,
+      port,
+      name,
+      identity:
         options.password ||
         options.uuid ||
         options.username ||
         options.token ||
-        "";
+        "",
+      password: options.password || "",
+      security: options.tls || "",
+      sni:
+        options.sni ||
+        options.peer ||
+        options.servername ||
+        "",
+      uri: "",
+      rawProxy: null,
+      params: options
+    };
 
-      const node = {
-        type,
-        server,
-        port,
-        name,
-        identity,
-        password: options.password || "",
-        security: options.tls || "",
-        sni: options.sni || options.peer || options.servername || "",
-        uri: "",
-        rawProxy: null,
-        params: options
-      };
-
-      if (type !== "mieru" && type !== "wireguard") {
-        node.uri = buildNodeUri(node);
-      }
-
-      result.push(node);
-      continue;
-    }
-
-    // Quantumult X 常见格式：
-    // tag=节点名, ss, server, port, method=..., password=...
     if (
-      line.includes("tag=") &&
-      /,\s*(ss|shadowsocks|vmess|vless|trojan|http|socks5)\s*,/i.test(line)
+      type !== "mieru" &&
+      type !== "wireguard"
     ) {
-      const parts = splitCsv(line);
-      const tagPart = parts[0] || "";
-      const name = tagPart.replace(/^tag=/i, "").trim();
-
-      const type = map[String(parts[1] || "").toLowerCase()];
-      const server = parts[2] || "";
-      const port = validPort(parts[3]);
-
-      if (!type || !server || !port) continue;
-
-      const options = {};
-
-      for (const part of parts.slice(4)) {
-        const index = part.indexOf("=");
-
-        if (index < 0) continue;
-
-        options[part.slice(0, index).trim().toLowerCase()] =
-          part.slice(index + 1).trim();
-      }
-
-      const node = {
-        type,
-        server,
-        port,
-        name: name || server,
-        identity: options.password || options.uuid || "",
-        password: options.password || "",
-        security: options.tls || "",
-        sni: options.sni || "",
-        uri: "",
-        rawProxy: null,
-        params: options
-      };
-
       node.uri = buildNodeUri(node);
-      result.push(node);
     }
+
+    result.push(node);
   }
 
   return result;
+}
+
+// ======================================
+// Quantumult X
+// ======================================
+
+function parseQuantumultX(text) {
+  const result = [];
+
+  const map = {
+    ss: "ss",
+    shadowsocks: "ss",
+    vmess: "vmess",
+    vless: "vless",
+    trojan: "trojan",
+    http: "http",
+    socks5: "socks5"
+  };
+
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+
+    if (
+      !line ||
+      line.startsWith("#") ||
+      line.startsWith(";")
+    ) {
+      continue;
+    }
+
+    if (!/tag\s*=/i.test(line)) continue;
+
+    const parts = splitCsv(line);
+
+    if (parts.length < 4) continue;
+
+    const tagPart = parts[0] || "";
+    const name = tagPart.replace(/^tag\s*=/i, "").trim();
+
+    const type = map[
+      String(parts[1] || "").toLowerCase()
+    ];
+
+    const server = parts[2] || "";
+    const port = validPort(parts[3]);
+
+    if (!type || !server || !port) continue;
+
+    const options = parseOptions(parts.slice(4));
+
+    const node = {
+      type,
+      server,
+      port,
+      name: name || server,
+      identity:
+        options.password ||
+        options.uuid ||
+        options.username ||
+        "",
+      password: options.password || "",
+      security: options.tls || "",
+      sni: options.sni || options.peer || "",
+      uri: "",
+      rawProxy: null,
+      params: options
+    };
+
+    node.uri = buildNodeUri(node);
+
+    result.push(node);
+  }
+
+  return result;
+}
+
+// ======================================
+// 通用配置文本入口
+// ======================================
+
+function parseConfigText(text) {
+  const source = String(text || "");
+
+  // 先尝试 Surge / Loon
+  const surge = parseSurgeLoon(source);
+
+  if (surge.length) return surge;
+
+  // 再尝试 Quantumult X
+  const quantumult = parseQuantumultX(source);
+
+  if (quantumult.length) return quantumult;
+
+  return [];
 }
 
 // ======================================
@@ -1078,7 +1276,8 @@ function parseConfigText(text) {
 // ======================================
 
 function buildNodeUri(n) {
-  const enc = value => encodeURIComponent(String(value ?? ""));
+  const enc = value =>
+    encodeURIComponent(String(value ?? ""));
 
   const p = n.rawProxy || {};
   const params = n.params || {};
@@ -1087,7 +1286,9 @@ function buildNodeUri(n) {
   const port = n.port;
   const name = enc(n.name);
 
-  if (!server || !port) return n.uri || "";
+  if (!server || !port) {
+    return n.uri || "";
+  }
 
   // VMess
   if (n.type === "vmess") {
@@ -1107,7 +1308,9 @@ function buildNodeUri(n) {
       sni: original.sni || n.sni || ""
     };
 
-    return "vmess://" + encodeBase64(JSON.stringify(j));
+    return "vmess://" + encodeBase64(
+      JSON.stringify(j)
+    );
   }
 
   // SS
@@ -1117,19 +1320,27 @@ function buildNodeUri(n) {
 
     if (n.identity.includes(":")) {
       const index = n.identity.indexOf(":");
+
       cipher = n.identity.slice(0, index);
       password = n.identity.slice(index + 1);
     }
 
-    if (!cipher || !password) return n.uri || "";
+    if (!cipher || !password) {
+      return n.uri || "";
+    }
 
-    const auth = encodeBase64(`${cipher}:${password}`);
+    const auth = encodeBase64(
+      `${cipher}:${password}`
+    );
 
     return `ss://${auth}@${server}:${port}#${name}`;
   }
 
   // HTTP / SOCKS5
-  if (n.type === "http" || n.type === "socks5") {
+  if (
+    n.type === "http" ||
+    n.type === "socks5"
+  ) {
     const username = n.identity || p.username || "";
     const password = n.password || p.password || "";
 
@@ -1140,7 +1351,7 @@ function buildNodeUri(n) {
     return `${n.type}://${auth}${server}:${port}#${name}`;
   }
 
-  // 其他常规 URI 协议
+  // 其余协议
   const user =
     p.uuid ||
     p.password ||
@@ -1148,13 +1359,15 @@ function buildNodeUri(n) {
     n.identity ||
     "";
 
-  const auth = user ? `${enc(user)}@` : "";
+  const auth = user
+    ? `${enc(user)}@`
+    : "";
 
   const q = new URLSearchParams();
 
   const allParams = {
     ...params,
-    ...(p || {})
+    ...p
   };
 
   const sni =
@@ -1168,14 +1381,22 @@ function buildNodeUri(n) {
     q.set("security", allParams.security);
   }
 
-  if (allParams.flow) q.set("flow", allParams.flow);
-
-  if (allParams.fingerprint || allParams.fp) {
-    q.set("fp", allParams.fingerprint || allParams.fp);
+  if (allParams.flow) {
+    q.set("flow", allParams.flow);
   }
 
-  if (allParams.network) {
-    q.set("type", allParams.network);
+  if (allParams.fingerprint || allParams.fp) {
+    q.set(
+      "fp",
+      allParams.fingerprint || allParams.fp
+    );
+  }
+
+  if (allParams.network || allParams.type) {
+    q.set(
+      "type",
+      allParams.network || allParams.type
+    );
   }
 
   if (allParams.alpn) {
@@ -1188,18 +1409,21 @@ function buildNodeUri(n) {
   }
 
   // Reality
-  if (allParams["reality-opts"] || allParams.reality) {
-    const reality =
-      allParams["reality-opts"] ||
-      allParams.reality;
+  const reality =
+    allParams["reality-opts"] ||
+    allParams.reality;
 
-    if (reality["public-key"] || reality.publicKey) {
-      q.set("pbk", reality["public-key"] || reality.publicKey);
-    }
+  if (reality && typeof reality === "object") {
+    const publicKey =
+      reality["public-key"] ||
+      reality.publicKey;
 
-    if (reality["short-id"] || reality.shortId) {
-      q.set("sid", reality["short-id"] || reality.shortId);
-    }
+    const shortId =
+      reality["short-id"] ||
+      reality.shortId;
+
+    if (publicKey) q.set("pbk", publicKey);
+    if (shortId) q.set("sid", shortId);
   }
 
   // WebSocket
@@ -1218,7 +1442,10 @@ function buildNodeUri(n) {
     const grpc = allParams["grpc-opts"];
 
     if (grpc["grpc-service-name"]) {
-      q.set("serviceName", grpc["grpc-service-name"]);
+      q.set(
+        "serviceName",
+        grpc["grpc-service-name"]
+      );
     }
   }
 
@@ -1228,7 +1455,10 @@ function buildNodeUri(n) {
 
   const query = q.toString();
 
-  return `${n.type}://${auth}${server}:${port}${query ? "?" + query : ""}#${name}`;
+  return (
+    `${n.type}://${auth}${server}:${port}` +
+    `${query ? "?" + query : ""}#${name}`
+  );
 }
 
 // ======================================
@@ -1245,6 +1475,7 @@ function stableValue(value) {
 
     for (const key of Object.keys(value).sort()) {
       if (key === "name") continue;
+
       result[key] = stableValue(value[key]);
     }
 
@@ -1260,7 +1491,15 @@ function stableValue(value) {
 
 function getFingerprint(n) {
   if (n.rawProxy) {
-    return JSON.stringify(stableValue(n.rawProxy));
+    return safeJsonStringify(
+      stableValue(n.rawProxy)
+    );
+  }
+
+  if (n.singboxData) {
+    return safeJsonStringify(
+      stableValue(n.singboxData)
+    );
   }
 
   if (n.uri) {
@@ -1274,7 +1513,9 @@ function getFingerprint(n) {
       const params = [...u.searchParams.entries()]
         .sort((a, b) => {
           const keyCompare = a[0].localeCompare(b[0]);
-          return keyCompare || a[1].localeCompare(b[1]);
+
+          return keyCompare ||
+            a[1].localeCompare(b[1]);
         });
 
       u.search = "";
@@ -1512,19 +1753,38 @@ const REGION_BY_NAME = new Map();
 
 for (const line of REGION_DATA.trim().split("\n")) {
   const [name, code, aliasText = ""] = line.split("|");
-  const aliases = [name, ...aliasText.split(",")].filter(Boolean);
-  const item = { name, code, aliases };
+
+  const aliases = [
+    name,
+    ...aliasText.split(",")
+  ].filter(Boolean);
+
+  const item = {
+    name,
+    code,
+    aliases
+  };
 
   REGION_MAP.push(item);
 
   for (const alias of aliases) {
-    REGION_BY_NAME.set(alias.toLowerCase(), item);
+    REGION_BY_NAME.set(
+      alias.toLowerCase(),
+      item
+    );
   }
 }
 
 const REGION_MATCHERS = REGION_MAP
-  .flatMap(item => item.aliases.map(alias => ({ alias, item })))
-  .sort((a, b) => b.alias.length - a.alias.length);
+  .flatMap(item =>
+    item.aliases.map(alias => ({
+      alias,
+      item
+    }))
+  )
+  .sort((a, b) =>
+    b.alias.length - a.alias.length
+  );
 
 // ======================================
 // 地区识别
@@ -1551,19 +1811,24 @@ function region(name) {
         "i"
       );
 
-      if (re.test(s)) return entry.item.name;
+      if (re.test(s)) {
+        return entry.item.name;
+      }
     } else if (s.includes(alias)) {
       return entry.item.name;
     }
   }
 
+  // ISO 国家代码
   for (const item of REGION_MAP) {
     const re = new RegExp(
       `(^|[^a-z])${item.code.toLowerCase()}([^a-z]|$)`,
       "i"
     );
 
-    if (re.test(s)) return item.name;
+    if (re.test(s)) {
+      return item.name;
+    }
   }
 
   return "未知";
@@ -1580,9 +1845,13 @@ function flag(r) {
 
   if (!item) return "🌐";
 
-  return [...item.code].map(char =>
-    String.fromCodePoint(127397 + char.charCodeAt(0))
-  ).join("");
+  return [...item.code]
+    .map(char =>
+      String.fromCodePoint(
+        127397 + char.charCodeAt(0)
+      )
+    )
+    .join("");
 }
 
 // ======================================
@@ -1621,8 +1890,10 @@ function maskSubscriptionUrl(value) {
     ];
 
     for (const key of sensitive) {
-      if (u.searchParams.has(key)) {
-        u.searchParams.set(key, "******");
+      for (const existing of [...u.searchParams.keys()]) {
+        if (existing.toLowerCase() === key) {
+          u.searchParams.set(existing, "******");
+        }
       }
     }
 
@@ -1641,12 +1912,20 @@ function getAirportName(sourceUrl) {
 
   try {
     const u = new URL(sourceUrl);
-    const parts = u.pathname.split("/").filter(Boolean);
+
+    const parts = u.pathname
+      .split("/")
+      .filter(Boolean);
 
     if (parts.length) {
-      let name = safeDecode(parts[parts.length - 1]);
+      let name = safeDecode(
+        parts[parts.length - 1]
+      );
 
-      name = name.replace(/\.(yaml|yml|txt|json|conf)$/i, "");
+      name = name.replace(
+        /\.(yaml|yml|txt|json|conf)$/i,
+        ""
+      );
 
       return name || u.hostname;
     }
@@ -1671,16 +1950,37 @@ function parseUserinfo(value) {
 
     if (index < 0) continue;
 
-    const key = part.slice(0, index).trim().toLowerCase();
-    const val = part.slice(index + 1).trim();
+    const key = part
+      .slice(0, index)
+      .trim()
+      .toLowerCase();
+
+    const val = part
+      .slice(index + 1)
+      .trim();
 
     v[key] = val;
   }
 
-  const upload = Math.max(0, Number(v.upload || 0) || 0);
-  const download = Math.max(0, Number(v.download || 0) || 0);
-  const total = Math.max(0, Number(v.total || 0) || 0);
-  const expire = Math.max(0, Number(v.expire || 0) || 0);
+  const upload = Math.max(
+    0,
+    Number(v.upload || 0) || 0
+  );
+
+  const download = Math.max(
+    0,
+    Number(v.download || 0) || 0
+  );
+
+  const total = Math.max(
+    0,
+    Number(v.total || 0) || 0
+  );
+
+  const expire = Math.max(
+    0,
+    Number(v.expire || 0) || 0
+  );
 
   const used = upload + download;
 
@@ -1711,13 +2011,20 @@ function parseUserinfo(value) {
 // ======================================
 
 function fmt(n) {
-  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  if (!Number.isFinite(n) || n <= 0) {
+    return "0 B";
+  }
 
-  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  const units = [
+    "B", "KB", "MB", "GB", "TB", "PB"
+  ];
 
   let i = 0;
 
-  while (n >= 1024 && i < units.length - 1) {
+  while (
+    n >= 1024 &&
+    i < units.length - 1
+  ) {
     n /= 1024;
     i++;
   }
@@ -1744,32 +2051,42 @@ export function renderResult(p, nodeLimit = 20) {
   if (!p.protocolCounts || !p.regionCounts) {
     for (const n of nodes) {
       if (!p.protocolCounts) {
-        protocols[n.type] = (protocols[n.type] || 0) + 1;
+        protocols[n.type] =
+          (protocols[n.type] || 0) + 1;
       }
 
       if (!p.regionCounts) {
         const r = region(n.name);
-        regions[r] = (regions[r] || 0) + 1;
+
+        regions[r] =
+          (regions[r] || 0) + 1;
       }
     }
   }
 
-  const fingerprints = new Set(nodes.map(getFingerprint));
+  const fingerprints = new Set(
+    nodes.map(getFingerprint)
+  );
 
   const duplicateCount =
-    p.duplicateCount ?? (nodes.length - fingerprints.size);
+    p.duplicateCount ??
+    (nodes.length - fingerprints.size);
 
   const uniqueCount =
-    p.uniqueCount ?? fingerprints.size;
+    p.uniqueCount ??
+    fingerprints.size;
 
   const totalCount =
-    p.totalCount ?? nodes.length;
+    p.totalCount ??
+    nodes.length;
 
   const parsedCount =
-    p.parsedCount ?? totalCount;
+    p.parsedCount ??
+    totalCount;
 
   const truncatedCount =
-    p.truncatedCount ?? Math.max(0, parsedCount - nodes.length);
+    p.truncatedCount ??
+    Math.max(0, parsedCount - nodes.length);
 
   const info = parseUserinfo(
     p.headers?.userinfo ||
@@ -1786,9 +2103,11 @@ export function renderResult(p, nodeLimit = 20) {
     )
     .join(" ");
 
-  const protocolNames = [...new Set(
-    Object.keys(protocols).map(protocolLabel)
-  )];
+  const protocolNames = [
+    ...new Set(
+      Object.keys(protocols).map(protocolLabel)
+    )
+  ];
 
   const protocolText = protocolNames.length
     ? protocolNames.map(escapeHtml).join("、")
@@ -1837,12 +2156,14 @@ export function renderResult(p, nodeLimit = 20) {
 
     let name = String(n.name || "");
 
-    // 已识别地区时，避免备注开头重复出现相同旗帜
+    // 已识别地区时，只去除开头重复的同一面旗帜
     if (
       r !== "未知" &&
       name.startsWith(regionFlag)
     ) {
-      name = name.slice(regionFlag.length).trimStart();
+      name = name
+        .slice(regionFlag.length)
+        .trimStart();
     }
 
     const separator = r === "未知" ? "" : " ";
@@ -1918,9 +2239,10 @@ export function renderResult(p, nodeLimit = 20) {
 export function exportBase64(nodes) {
   const text = (nodes || [])
     .map(n => {
+      // 有原始 URI，直接保留
       if (n.uri) return n.uri;
 
-      // 没有标准分享 URI 的原生配置不伪造链接
+      // 没有可靠分享 URI，不伪造
       return "";
     })
     .filter(Boolean)
@@ -1936,7 +2258,7 @@ export function exportBase64(nodes) {
 function nodeToClash(n) {
   if (!n) return null;
 
-  // 原始 Clash 配置直接保留，避免丢失高级参数
+  // 原始 Clash 配置优先保留
   if (n.rawProxy) {
     return {
       ...n.rawProxy,
@@ -1944,15 +2266,23 @@ function nodeToClash(n) {
     };
   }
 
-  // Mieru Protobuf 分享链接不能直接转换成 Clash 节点
-  if (n.opaque) return null;
+  // Sing-box 原生配置不强行转换
+  if (n.singboxData) {
+    return null;
+  }
 
-  // WireGuard 缺少完整参数时不生成残缺配置
+  // Mieru Protobuf 配置不伪造 Clash 节点
+  if (n.opaque || n.type === "mieru") {
+    return null;
+  }
+
+  // WireGuard 缺少完整字段时不生成残缺配置
   if (n.type === "wireguard") {
-    if (n.singboxData) {
-      return null;
-    }
+    return null;
+  }
 
+  // SSR 不存在可靠的通用转换
+  if (n.type === "ssr") {
     return null;
   }
 
@@ -1966,7 +2296,10 @@ function nodeToClash(n) {
   const identity = n.identity || "";
   const params = n.params || {};
 
-  if (n.type === "vless" || n.type === "vmess") {
+  if (
+    n.type === "vless" ||
+    n.type === "vmess"
+  ) {
     p.uuid = identity;
   }
 
@@ -1981,7 +2314,10 @@ function nodeToClash(n) {
 
   if (n.type === "tuic") {
     p.uuid = identity;
-    if (n.password) p.password = n.password;
+
+    if (n.password) {
+      p.password = n.password;
+    }
   }
 
   if (n.type === "ss") {
@@ -1993,11 +2329,10 @@ function nodeToClash(n) {
     }
   }
 
-  if (n.type === "ssr") {
-    return null;
-  }
-
-  if (n.type === "http" || n.type === "socks5") {
+  if (
+    n.type === "http" ||
+    n.type === "socks5"
+  ) {
     if (identity) p.username = identity;
     if (n.password) p.password = n.password;
   }
@@ -2007,18 +2342,23 @@ function nodeToClash(n) {
     p.tls = true;
   }
 
-  if (params.flow) p.flow = params.flow;
+  if (params.flow) {
+    p.flow = params.flow;
+  }
 
   if (params.network || params.type) {
     p.network = params.network || params.type;
   }
 
   if (params.alpn) {
-    p.alpn = String(params.alpn).split(",");
+    p.alpn = Array.isArray(params.alpn)
+      ? params.alpn
+      : String(params.alpn).split(",");
   }
 
   if (params.fp || params.fingerprint) {
-    p["client-fingerprint"] = params.fp || params.fingerprint;
+    p["client-fingerprint"] =
+      params.fp || params.fingerprint;
   }
 
   if (params.path) {
