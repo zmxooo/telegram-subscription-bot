@@ -22,9 +22,6 @@ const ALLOWED_FILE_EXTENSIONS = new Set([
   "conf", "ini", "list"
 ]);
 
-// 不再设置端口白名单。
-// 任意合法 HTTP / HTTPS 端口均可尝试访问。
-
 // ======================================
 // 请求头策略
 // ======================================
@@ -1214,6 +1211,32 @@ export async function fetchSubscription(
     );
   }
 
+  // ======================================
+  // 订阅响应头诊断日志
+  // ======================================
+
+  console.log("订阅响应头：", {
+    profileTitle: response.headers.get(
+      "profile-title"
+    ),
+
+    contentDisposition: response.headers.get(
+      "content-disposition"
+    ),
+
+    subscriptionUserinfo: response.headers.get(
+      "subscription-userinfo"
+    ),
+
+    contentType: response.headers.get(
+      "content-type"
+    ),
+
+    server: response.headers.get(
+      "server"
+    )
+  });
+
   // 读取最终订阅内容
   const text = await readLimitedText(
     response,
@@ -1239,12 +1262,10 @@ export async function fetchSubscription(
         "content-type"
       ),
 
-      // 订阅服务器提供的配置名称
       profileTitle: response.headers.get(
         "profile-title"
       ),
 
-      // 订阅服务器提供的文件名称
       contentDisposition: response.headers.get(
         "content-disposition"
       )
