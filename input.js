@@ -22,9 +22,6 @@ const ALLOWED_FILE_EXTENSIONS = new Set([
   "conf", "ini", "list"
 ]);
 
-// 不再设置端口白名单。
-// 任意合法 HTTP / HTTPS 端口均可尝试访问。
-
 // ======================================
 // 请求头策略
 // ======================================
@@ -332,7 +329,6 @@ function isPublicIPv6(host) {
   }
 
   // IPv4-mapped IPv6
-  // ::ffff:IPv4
   const isIPv4Mapped =
     parts.slice(0, 5).every(n => n === 0) &&
     parts[5] === 0xffff;
@@ -1080,6 +1076,33 @@ async function requestSubscription(url) {
 }
 
 // ======================================
+// 诊断正文脱敏
+// ======================================
+
+function sanitizeDiagnosticPreview(value) {
+  return String(value || "")
+    .slice(0, 500)
+
+    // URL 查询参数中的敏感值
+    .replace(
+      /([?&](?:token|key|auth|password|secret)=)[^&#\s"'<>]*/gi,
+      "$1[REDACTED]"
+    )
+
+    // YAML 中常见的敏感字段
+    .replace(
+      /^(\s*(?:password|token|secret|uuid|private-key|private_key)\s*:\s*).+$/gim,
+      "$1[REDACTED]"
+    )
+
+    // JSON 中常见的敏感字段
+    .replace(
+      /("(?:password|token|secret|uuid|privateKey)"\s*:\s*")[^"]*(")/gi,
+      "$1[REDACTED]$2"
+    );
+}
+
+// ======================================
 // 下载订阅
 // 支持多级重定向、多策略请求
 // ======================================
@@ -1214,7 +1237,10 @@ export async function fetchSubscription(
     );
   }
 
+  // ======================================
   // 读取最终订阅内容
+  // ======================================
+
   const text = await readLimitedText(
     response,
     MAX,
@@ -1227,6 +1253,38 @@ export async function fetchSubscription(
     );
   }
 
+  // ======================================
+  // 真实订阅响应诊断日志
+  // ======================================
+
+  console.log("订阅响应诊断：", {
+    status: response.status,
+
+    finalUrl: response.url || currentUrl.toString(),
+
+    profileTitle: response.headers.get(
+      "profile-title"
+    ),
+
+    contentDisposition: response.headers.get(
+      "content-disposition"
+    ),
+
+    subscriptionUserinfo: response.headers.get(
+      "subscription-userinfo"
+    ),
+
+    contentType: response.headers.get(
+      "content-type"
+    ),
+
+    server: response.headers.get(
+      "server"
+    ),
+
+    bodyPreview: sanitizeDiagnosticPreview(text)
+  });
+
   return {
     text,
 
@@ -1237,6 +1295,14 @@ export async function fetchSubscription(
 
       contentType: response.headers.get(
         "content-type"
+      ),
+
+      profileTitle: response.headers.get(
+        "profile-title"
+      ),
+
+      contentDisposition: response.headers.get(
+        "content-disposition"
       )
     }
   };
