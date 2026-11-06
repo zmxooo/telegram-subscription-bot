@@ -1237,6 +1237,16 @@ export async function fetchSubscription(
 
       contentType: response.headers.get(
         "content-type"
+      ),
+
+      // 订阅服务器提供的配置名称
+      profileTitle: response.headers.get(
+        "profile-title"
+      ),
+
+      // 订阅服务器提供的文件名称
+      contentDisposition: response.headers.get(
+        "content-disposition"
       )
     }
   };
