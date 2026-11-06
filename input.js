@@ -1,4 +1,3 @@
-
 const DEFAULT_MAX_BYTES = 1024 * 1024;
 const HARD_MAX_BYTES = 5 * 1024 * 1024;
 const REQUEST_TIMEOUT = 15000;
@@ -23,10 +22,8 @@ const ALLOWED_FILE_EXTENSIONS = new Set([
   "conf", "ini", "list"
 ]);
 
-const ALLOWED_PORTS = new Set([
-  "80", "443", "8080", "8443",
-  "2053", "2083", "2087", "2096"
-]);
+// 不再设置端口白名单。
+// 任意合法 HTTP / HTTPS 端口均可尝试访问。
 
 // ======================================
 // 请求头策略
@@ -193,7 +190,6 @@ function isPublicIPv4(host) {
 
     ["198.18.0.0", 15],
     ["198.51.100.0", 24],
-
     ["203.0.113.0", 24],
 
     ["224.0.0.0", 4],
@@ -204,6 +200,198 @@ function isPublicIPv4(host) {
     if (inIPv4Range(value, network, prefix)) {
       return false;
     }
+  }
+
+  return true;
+}
+
+// ======================================
+// IPv6 地址解析
+// ======================================
+
+function parseIPv6(host) {
+  let value = String(host || "")
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
+
+  if (
+    !value ||
+    value.includes("%")
+  ) {
+    return null;
+  }
+
+  // IPv4 嵌入式 IPv6
+  if (value.includes(".")) {
+    const lastColon = value.lastIndexOf(":");
+
+    if (lastColon < 0) {
+      return null;
+    }
+
+    const ipv4 = value.slice(lastColon + 1);
+    const ipv4Number = ipv4ToNumber(ipv4);
+
+    if (ipv4Number === null) {
+      return null;
+    }
+
+    const high = ((ipv4Number >>> 16) & 0xffff)
+      .toString(16);
+
+    const low = (ipv4Number & 0xffff)
+      .toString(16);
+
+    value =
+      value.slice(0, lastColon + 1) +
+      high +
+      ":" +
+      low;
+  }
+
+  if (
+    !/^[0-9a-f:]+$/i.test(value) ||
+    !value.includes(":")
+  ) {
+    return null;
+  }
+
+  if (value.split("::").length > 2) {
+    return null;
+  }
+
+  let parts;
+
+  if (value.includes("::")) {
+    const [leftText, rightText] = value.split("::");
+
+    const left = leftText
+      ? leftText.split(":")
+      : [];
+
+    const right = rightText
+      ? rightText.split(":")
+      : [];
+
+    const missing = 8 - left.length - right.length;
+
+    if (missing < 1) {
+      return null;
+    }
+
+    parts = [
+      ...left,
+      ...Array(missing).fill("0"),
+      ...right
+    ];
+  } else {
+    parts = value.split(":");
+
+    if (parts.length !== 8) {
+      return null;
+    }
+  }
+
+  if (parts.length !== 8) {
+    return null;
+  }
+
+  const numbers = parts.map(part => {
+    if (
+      !/^[0-9a-f]{1,4}$/i.test(part)
+    ) {
+      return NaN;
+    }
+
+    return parseInt(part, 16);
+  });
+
+  if (
+    numbers.some(
+      n =>
+        !Number.isInteger(n) ||
+        n < 0 ||
+        n > 65535
+    )
+  ) {
+    return null;
+  }
+
+  return numbers;
+}
+
+// ======================================
+// 判断 IPv6 是否属于公网地址
+// ======================================
+
+function isPublicIPv6(host) {
+  const parts = parseIPv6(host);
+
+  if (!parts) {
+    return false;
+  }
+
+  // IPv4-mapped IPv6
+  // ::ffff:IPv4
+  const isIPv4Mapped =
+    parts.slice(0, 5).every(n => n === 0) &&
+    parts[5] === 0xffff;
+
+  if (isIPv4Mapped) {
+    const ipv4Number =
+      parts[6] * 65536 + parts[7];
+
+    const ipv4 = [
+      (ipv4Number >>> 24) & 255,
+      (ipv4Number >>> 16) & 255,
+      (ipv4Number >>> 8) & 255,
+      ipv4Number & 255
+    ].join(".");
+
+    return isPublicIPv4(ipv4);
+  }
+
+  // 仅接受 IPv6 Global Unicast：2000::/3
+  if ((parts[0] & 0xe000) !== 0x2000) {
+    return false;
+  }
+
+  // 文档示例地址：2001:db8::/32
+  if (
+    parts[0] === 0x2001 &&
+    parts[1] === 0x0db8
+  ) {
+    return false;
+  }
+
+  // 基准测试地址：2001:2::/48
+  if (
+    parts[0] === 0x2001 &&
+    parts[1] === 0x0002 &&
+    parts[2] === 0x0000
+  ) {
+    return false;
+  }
+
+  // IETF 特殊用途地址段：2001::/23
+  if (
+    parts[0] === 0x2001 &&
+    (parts[1] & 0xfe00) === 0
+  ) {
+    return false;
+  }
+
+  // 6to4 地址段
+  if (parts[0] === 0x2002) {
+    return false;
+  }
+
+  // 文档地址：3fff::/20
+  if (
+    parts[0] === 0x3fff &&
+    (parts[1] & 0xf000) === 0
+  ) {
+    return false;
   }
 
   return true;
@@ -226,11 +414,28 @@ function isIpAddress(host) {
     return true;
   }
 
+  // 阻止整数、十六进制等非标准 IPv4 写法
   if (/^(?:0x[0-9a-f]+|[0-9]+)$/i.test(value)) {
     return true;
   }
 
   return false;
+}
+
+// ======================================
+// 判断 IP 是否属于公网
+// ======================================
+
+function isPublicIPAddress(host) {
+  const value = String(host || "")
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
+
+  if (value.includes(":")) {
+    return isPublicIPv6(value);
+  }
+
+  return isPublicIPv4(value);
 }
 
 // ======================================
@@ -342,13 +547,15 @@ function validateSubscriptionUrl(input) {
     throw new Error("订阅地址缺少有效域名。");
   }
 
+  // IP 地址检查
   if (isIpAddress(host)) {
-    if (!isPublicIPv4(host)) {
+    if (!isPublicIPAddress(host)) {
       throw new Error(
         "不允许访问私有、保留或非公网 IP 地址。"
       );
     }
   } else {
+    // 域名检查
     if (!isValidPublicHostname(host)) {
       throw new Error(
         "订阅地址必须使用有效的公网域名。"
@@ -356,14 +563,8 @@ function validateSubscriptionUrl(input) {
     }
   }
 
-  if (
-    url.port &&
-    !ALLOWED_PORTS.has(url.port)
-  ) {
-    throw new Error(
-      "订阅地址使用了不允许的端口。"
-    );
-  }
+  // 不再限制端口。
+  // URL 自身会处理非法端口格式。
 
   url.hash = "";
 
@@ -827,7 +1028,6 @@ async function requestSubscription(url) {
       } catch (error) {
         lastNetworkError = error;
 
-        // 网络错误最多重试一次
         if (retry < 1) {
           continue;
         }
@@ -835,7 +1035,6 @@ async function requestSubscription(url) {
         break;
       }
 
-      // 成功或重定向，直接交给上层
       if (
         response.ok ||
         REDIRECT_STATUSES.has(response.status)
@@ -843,7 +1042,6 @@ async function requestSubscription(url) {
         return response;
       }
 
-      // 403 / 406：尝试下一种请求方式
       if (RETRY_HEADER_STATUSES.has(response.status)) {
         lastHttpError = getResponseError(response);
 
@@ -852,7 +1050,6 @@ async function requestSubscription(url) {
         break;
       }
 
-      // 服务器临时错误：有限重试
       if (RETRY_STATUSES.has(response.status)) {
         lastHttpError = getResponseError(response);
 
@@ -865,17 +1062,14 @@ async function requestSubscription(url) {
         break;
       }
 
-      // 其他状态不盲目重试
       return response;
     }
   }
 
-  // 优先保留服务器明确返回的 HTTP 状态
   if (lastHttpError) {
     throw lastHttpError;
   }
 
-  // 所有请求方式都无法建立连接
   if (lastNetworkError) {
     throw lastNetworkError;
   }
@@ -956,7 +1150,7 @@ export async function fetchSubscription(
         );
       }
 
-      // 每次跳转重新校验
+      // 每次跳转重新校验协议、域名和 IP
       currentUrl = validateSubscriptionUrl(
         nextUrl.toString()
       );
