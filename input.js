@@ -1,3 +1,4 @@
+
 const DEFAULT_MAX_BYTES = 1024 * 1024;
 const HARD_MAX_BYTES = 5 * 1024 * 1024;
 const REQUEST_TIMEOUT = 15000;
@@ -23,22 +24,67 @@ const ALLOWED_FILE_EXTENSIONS = new Set([
 ]);
 
 // ======================================
-// 请求头策略
+// 客户端请求策略
+// 注意：这里只改变 HTTP 请求头，不改变 Worker 出口 IP
 // ======================================
 
 const REQUEST_PROFILES = [
   {
-    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "accept": "text/plain,application/yaml,application/json,application/octet-stream,*/*",
-    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8"
+    name: "Mihomo",
+    headers: {
+      "user-agent": "mihomo/1.19.0",
+      "accept": "*/*"
+    }
   },
   {
-    "user-agent": "SubscriptionParserBot/1.0",
-    "accept": "*/*"
+    name: "Clash.Meta",
+    headers: {
+      "user-agent": "Clash.Meta",
+      "accept": "*/*"
+    }
   },
   {
-    "user-agent": "Clash.Meta",
-    "accept": "*/*"
+    name: "Shadowrocket",
+    headers: {
+      "user-agent": "Shadowrocket",
+      "accept": "*/*"
+    }
+  },
+  {
+    name: "sing-box",
+    headers: {
+      "user-agent": "sing-box",
+      "accept": "*/*"
+    }
+  },
+  {
+    name: "Surge",
+    headers: {
+      "user-agent": "Surge",
+      "accept": "*/*"
+    }
+  },
+  {
+    name: "Quantumult X",
+    headers: {
+      "user-agent": "Quantumult X",
+      "accept": "*/*"
+    }
+  },
+  {
+    name: "Browser",
+    headers: {
+      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      "accept": "text/plain,application/yaml,application/json,application/octet-stream,*/*",
+      "accept-language": "zh-CN,zh;q=0.9,en;q=0.8"
+    }
+  },
+  {
+    name: "Generic",
+    headers: {
+      "user-agent": "SubscriptionParserBot/2.0",
+      "accept": "*/*"
+    }
   }
 ];
 
@@ -179,16 +225,13 @@ function isPublicIPv4(host) {
     ["127.0.0.0", 8],
     ["169.254.0.0", 16],
     ["172.16.0.0", 12],
-
     ["192.0.0.0", 24],
     ["192.0.2.0", 24],
     ["192.88.99.0", 24],
     ["192.168.0.0", 16],
-
     ["198.18.0.0", 15],
     ["198.51.100.0", 24],
     ["203.0.113.0", 24],
-
     ["224.0.0.0", 4],
     ["240.0.0.0", 4]
   ];
@@ -218,7 +261,6 @@ function parseIPv6(host) {
     return null;
   }
 
-  // IPv4 嵌入式 IPv6
   if (value.includes(".")) {
     const lastColon = value.lastIndexOf(":");
 
@@ -294,9 +336,7 @@ function parseIPv6(host) {
   }
 
   const numbers = parts.map(part => {
-    if (
-      !/^[0-9a-f]{1,4}$/i.test(part)
-    ) {
+    if (!/^[0-9a-f]{1,4}$/i.test(part)) {
       return NaN;
     }
 
@@ -328,7 +368,6 @@ function isPublicIPv6(host) {
     return false;
   }
 
-  // IPv4-mapped IPv6
   const isIPv4Mapped =
     parts.slice(0, 5).every(n => n === 0) &&
     parts[5] === 0xffff;
@@ -347,12 +386,10 @@ function isPublicIPv6(host) {
     return isPublicIPv4(ipv4);
   }
 
-  // 仅接受 IPv6 Global Unicast：2000::/3
   if ((parts[0] & 0xe000) !== 0x2000) {
     return false;
   }
 
-  // 文档示例地址：2001:db8::/32
   if (
     parts[0] === 0x2001 &&
     parts[1] === 0x0db8
@@ -360,7 +397,6 @@ function isPublicIPv6(host) {
     return false;
   }
 
-  // 基准测试地址：2001:2::/48
   if (
     parts[0] === 0x2001 &&
     parts[1] === 0x0002 &&
@@ -369,7 +405,6 @@ function isPublicIPv6(host) {
     return false;
   }
 
-  // IETF 特殊用途地址段：2001::/23
   if (
     parts[0] === 0x2001 &&
     (parts[1] & 0xfe00) === 0
@@ -377,12 +412,10 @@ function isPublicIPv6(host) {
     return false;
   }
 
-  // 6to4 地址段
   if (parts[0] === 0x2002) {
     return false;
   }
 
-  // 文档地址：3fff::/20
   if (
     parts[0] === 0x3fff &&
     (parts[1] & 0xf000) === 0
@@ -410,7 +443,6 @@ function isIpAddress(host) {
     return true;
   }
 
-  // 阻止整数、十六进制等非标准 IPv4 写法
   if (/^(?:0x[0-9a-f]+|[0-9]+)$/i.test(value)) {
     return true;
   }
@@ -543,7 +575,6 @@ function validateSubscriptionUrl(input) {
     throw new Error("订阅地址缺少有效域名。");
   }
 
-  // IP 地址检查
   if (isIpAddress(host)) {
     if (!isPublicIPAddress(host)) {
       throw new Error(
@@ -551,16 +582,12 @@ function validateSubscriptionUrl(input) {
       );
     }
   } else {
-    // 域名检查
     if (!isValidPublicHostname(host)) {
       throw new Error(
         "订阅地址必须使用有效的公网域名。"
       );
     }
   }
-
-  // 不再限制端口。
-  // URL 自身会处理非法端口格式。
 
   url.hash = "";
 
@@ -789,7 +816,6 @@ export async function extractMessageInput(
 ) {
   const MAX = getMaxBytes(env);
 
-  // 普通文字
   if (
     typeof message.text === "string" &&
     message.text.trim()
@@ -821,7 +847,6 @@ export async function extractMessageInput(
     };
   }
 
-  // Telegram 文件
   const doc = message.document;
 
   if (doc) {
@@ -989,20 +1014,13 @@ function getResponseError(response) {
 
 // ======================================
 // 多策略请求订阅服务器
-// 保留最终 HTTP 状态和诊断信息
 // ======================================
 
 async function requestSubscription(url) {
   let lastNetworkError = null;
   let lastHttpError = null;
 
-  for (
-    let profileIndex = 0;
-    profileIndex < REQUEST_PROFILES.length;
-    profileIndex++
-  ) {
-    const headers = REQUEST_PROFILES[profileIndex];
-
+  for (const profile of REQUEST_PROFILES) {
     for (
       let retry = 0;
       retry <= MAX_SERVER_RETRIES;
@@ -1016,7 +1034,9 @@ async function requestSubscription(url) {
           {
             method: "GET",
             redirect: "manual",
-            headers
+            headers: {
+              ...profile.headers
+            }
           }
         );
 
@@ -1024,7 +1044,7 @@ async function requestSubscription(url) {
       } catch (error) {
         lastNetworkError = error;
 
-        if (retry < 1) {
+        if (retry < MAX_SERVER_RETRIES) {
           continue;
         }
 
@@ -1035,6 +1055,11 @@ async function requestSubscription(url) {
         response.ok ||
         REDIRECT_STATUSES.has(response.status)
       ) {
+        console.log("订阅请求成功：", {
+          profile: profile.name,
+          status: response.status
+        });
+
         return response;
       }
 
@@ -1042,6 +1067,11 @@ async function requestSubscription(url) {
         lastHttpError = getResponseError(response);
 
         await response.body?.cancel().catch(() => {});
+
+        console.log("订阅请求被拒绝：", {
+          profile: profile.name,
+          status: response.status
+        });
 
         break;
       }
@@ -1071,7 +1101,7 @@ async function requestSubscription(url) {
   }
 
   throw new Error(
-    "订阅服务器暂时无法访问，未收到有效 HTTP 响应。"
+    "已尝试所有订阅请求方式，仍然无法获取有效响应。"
   );
 }
 
@@ -1115,7 +1145,6 @@ export async function fetchSubscription(
       );
     }
 
-    // 处理重定向
     if (REDIRECT_STATUSES.has(response.status)) {
       const location = response.headers.get("location");
 
@@ -1146,7 +1175,6 @@ export async function fetchSubscription(
         );
       }
 
-      // 每次跳转重新校验协议、域名和 IP
       currentUrl = validateSubscriptionUrl(
         nextUrl.toString()
       );
@@ -1154,7 +1182,6 @@ export async function fetchSubscription(
       continue;
     }
 
-    // 处理异常 HTTP 状态
     if (!response.ok) {
       const status = response.status;
 
@@ -1180,7 +1207,7 @@ export async function fetchSubscription(
 
       if (status === 403) {
         throw new Error(
-          `订阅服务器拒绝访问（403）。服务器：${server}；请求追踪 ID：${requestId}。可能存在来源 IP 或访问权限限制。`
+          `订阅服务器拒绝访问（403）。服务器：${server}；Content-Type：${contentType}；请求追踪 ID：${requestId}。可能存在来源 IP 或访问权限限制。`
         );
       }
 
@@ -1211,7 +1238,7 @@ export async function fetchSubscription(
   }
 
   // ======================================
-  // 读取最终订阅内容
+  // 读取完整订阅内容
   // ======================================
 
   const text = await readLimitedText(
@@ -1227,8 +1254,8 @@ export async function fetchSubscription(
   }
 
   // ======================================
-  // 真实订阅响应诊断日志
-  // 不脱敏，直接输出原始内容
+  // 响应诊断
+  // 不输出完整订阅内容，避免泄露节点凭据
   // ======================================
 
   console.log("订阅响应诊断：", {
@@ -1256,7 +1283,11 @@ export async function fetchSubscription(
       "server"
     ),
 
-    bodyPreview: text.slice(0, 500)
+    bodyLength: new TextEncoder()
+      .encode(text)
+      .byteLength,
+
+    bodyPreview: text.slice(0, 120)
   });
 
   // ======================================
